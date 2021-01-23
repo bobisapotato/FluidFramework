@@ -28,6 +28,7 @@ export class LocalDocumentService implements api.IDocumentService {
         private readonly tenantId: string,
         private readonly documentId: string,
         private readonly documentDeltaConnectionsMap: Map<string, LocalDocumentDeltaConnection>,
+        private readonly innerDocumentService?: api.IDocumentService,
     ) { }
 
     /**
@@ -42,6 +43,9 @@ export class LocalDocumentService implements api.IDocumentService {
      * Creates and returns a delta storage service for local use.
      */
     public async connectToDeltaStorage(): Promise<api.IDocumentDeltaStorageService> {
+        if (this.innerDocumentService) {
+            return this.innerDocumentService.connectToDeltaStorage();
+        }
         return new LocalDeltaStorageService(
             this.tenantId,
             this.documentId,
@@ -52,16 +56,21 @@ export class LocalDocumentService implements api.IDocumentService {
      * Creates and returns a delta stream for local use.
      * @param client - client data
      */
-    public async connectToDeltaStream(
-        client: IClient): Promise<api.IDocumentDeltaConnection> {
-        const ordererToken = await this.tokenProvider.fetchOrdererToken();
+    public async connectToDeltaStream(client: IClient): Promise<api.IDocumentDeltaConnection> {
+        if (this.innerDocumentService) {
+            return this.innerDocumentService.connectToDeltaStream(client);
+        }
+        const ordererToken = await this.tokenProvider.fetchOrdererToken(
+            this.tenantId,
+            this.documentId,
+        );
         const documentDeltaConnection = await LocalDocumentDeltaConnection.create(
             this.tenantId,
             this.documentId,
             ordererToken.jwt,
             client,
-            this.localDeltaConnectionServer.webSocketServer);
-
+            this.localDeltaConnectionServer.webSocketServer,
+        );
         const clientId = documentDeltaConnection.clientId;
 
         // Add this document service for the clientId in the document service factory.
@@ -73,13 +82,6 @@ export class LocalDocumentService implements api.IDocumentService {
         });
 
         return documentDeltaConnection;
-    }
-
-    /**
-     * Returns null
-     */
-    public async branch(): Promise<string> {
-        throw new Error("Not implemented");
     }
 
     /**
@@ -105,7 +107,15 @@ export function createLocalDocumentService(
     tokenProvider: socketStorage.ITokenProvider,
     tenantId: string,
     documentId: string,
-    documentDeltaConnectionsMap: Map<string, LocalDocumentDeltaConnection>): api.IDocumentService {
+    documentDeltaConnectionsMap: Map<string, LocalDocumentDeltaConnection>,
+    innerDocumentService?: api.IDocumentService): api.IDocumentService {
     return new LocalDocumentService(
-        resolvedUrl, localDeltaConnectionServer, tokenProvider, tenantId, documentId, documentDeltaConnectionsMap);
+        resolvedUrl,
+        localDeltaConnectionServer,
+        tokenProvider,
+        tenantId,
+        documentId,
+        documentDeltaConnectionsMap,
+        innerDocumentService,
+    );
 }

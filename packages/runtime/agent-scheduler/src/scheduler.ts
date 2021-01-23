@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
 import { EventEmitter } from "events";
+import { assert } from "@fluidframework/common-utils";
 import {
     IFluidObject,
     IFluidHandle,
@@ -12,7 +12,7 @@ import {
     IRequest,
     IResponse,
 } from "@fluidframework/core-interfaces";
-import { FluidDataStoreRuntime, FluidObjectHandle } from "@fluidframework/datastore";
+import { FluidObjectHandle, mixinRequestHandler } from "@fluidframework/datastore";
 import { LoaderHeader, AttachState } from "@fluidframework/container-definitions";
 import { ISharedMap, SharedMap } from "@fluidframework/map";
 import { ConsensusRegisterCollection } from "@fluidframework/register-collection";
@@ -44,6 +44,7 @@ class AgentScheduler extends EventEmitter implements IAgentScheduler {
         } else {
             root = await runtime.getChannel("root") as ISharedMap;
             const handle = await root.wait<IFluidHandle<ConsensusRegisterCollection<string | null>>>("scheduler");
+            assert(handle !== undefined);
             scheduler = await handle.get();
         }
         const agentScheduler = new AgentScheduler(runtime, context, scheduler);
@@ -59,7 +60,7 @@ class AgentScheduler extends EventEmitter implements IAgentScheduler {
             return UnattachedClientId;
         }
         const clientId = this.runtime.clientId;
-        assert(clientId);
+        assert(!!clientId);
         return clientId;
     }
 
@@ -88,7 +89,7 @@ class AgentScheduler extends EventEmitter implements IAgentScheduler {
     public async register(...taskUrls: string[]): Promise<void> {
         for (const taskUrl of taskUrls) {
             if (this.registeredTasks.has(taskUrl)) {
-                return Promise.reject(`${taskUrl} is already registered`);
+                return Promise.reject(new Error(`${taskUrl} is already registered`));
             }
         }
         const unregisteredTasks: string[] = [];
@@ -105,7 +106,7 @@ class AgentScheduler extends EventEmitter implements IAgentScheduler {
 
     public async pick(taskId: string, worker: () => Promise<void>): Promise<void> {
         if (this.locallyRunnableTasks.has(taskId)) {
-            return Promise.reject(`${taskId} is already attempted`);
+            return Promise.reject(new Error(`${taskId} is already attempted`));
         }
         this.locallyRunnableTasks.set(taskId, worker);
 
@@ -130,13 +131,13 @@ class AgentScheduler extends EventEmitter implements IAgentScheduler {
         const active = this.isActive();
         for (const taskUrl of taskUrls) {
             if (!this.locallyRunnableTasks.has(taskUrl)) {
-                return Promise.reject(`${taskUrl} was never registered`);
+                return Promise.reject(new Error(`${taskUrl} was never registered`));
             }
             // Note - the assumption is - we are connected.
             // If not - all tasks should have been dropped already on disconnect / attachment
             assert(active);
             if (this.getTaskClientId(taskUrl) !== this.clientId) {
-                return Promise.reject(`${taskUrl} was never picked`);
+                return Promise.reject(new Error(`${taskUrl} was never picked`));
             }
         }
         return this.releaseCore([...taskUrls]);
@@ -230,7 +231,7 @@ class AgentScheduler extends EventEmitter implements IAgentScheduler {
             if (this.isActive() && currentClient === this.clientId) {
                 this.onNewTaskAssigned(key);
             } else {
-                await this.onTaskReasigned(key, currentClient);
+                await this.onTaskReassigned(key, currentClient);
             }
         });
 
@@ -274,7 +275,7 @@ class AgentScheduler extends EventEmitter implements IAgentScheduler {
         }
     }
 
-    private async onTaskReasigned(key: string, currentClient: string | null) {
+    private async onTaskReassigned(key: string, currentClient: string | null) {
         if (this.runningTasks.has(key)) {
             this.runningTasks.delete(key);
             this.emit("released", key);
@@ -420,9 +421,9 @@ export class TaskManager implements ITaskManager {
      */
     public async pick(taskId: string, worker?: boolean): Promise<void> {
         if (!this.context.deltaManager.clientDetails.capabilities.interactive) {
-            return Promise.reject("Picking not allowed on secondary copy");
+            return Promise.reject(new Error("Picking not allowed on secondary copy"));
         } else if (this.runtime.attachState !== AttachState.Attached) {
-            return Promise.reject("Picking not allowed in detached container in task manager");
+            return Promise.reject(new Error("Picking not allowed in detached container in task manager"));
         } else {
             const fullUrl = `/${this.runtime.id}/${this.taskUrl}/${taskId}`;
             return this.scheduler.pick(
@@ -447,13 +448,13 @@ export class TaskManager implements ITaskManager {
         };
         const response = await this.runtime.loader.request(request);
         if (response.status !== 200 || response.mimeType !== "fluid/object") {
-            return Promise.reject(`Invalid agent route: ${url}`);
+            return Promise.reject(new Error(`Invalid agent route: ${url}`));
         }
 
         const fluidObject = response.value as IFluidObject;
         const agent = fluidObject.IFluidRunnable;
         if (agent === undefined) {
-            return Promise.reject("Fluid object does not implement IFluidRunnable");
+            return Promise.reject(new Error("Fluid object does not implement IFluidRunnable"));
         }
 
         return agent.run();
@@ -477,18 +478,14 @@ export class TaskManagerFactory implements IFluidDataStoreFactory {
         dataTypes.set(mapFactory.type, mapFactory);
         dataTypes.set(consensusRegisterCollectionFactory.type, consensusRegisterCollectionFactory);
 
-        const runtime = FluidDataStoreRuntime.load(
-            context,
-            dataTypes,
-        );
+        const runtimeClass = mixinRequestHandler(
+            async (request: IRequest) => {
+                const router = await routerP;
+                return router.request(request);
+            });
 
-        // Warning: This promise is unhandled in this scope, and can result in unhandled promise rejection error,
-        // similar to cases where the no-floating-promise eslint rule applies.
-        const taskManagerP = TaskManager.load(runtime, context);
-        runtime.registerRequestHandler(async (request: IRequest) => {
-            const taskManager = await taskManagerP;
-            return taskManager.request(request);
-        });
+        const runtime = new runtimeClass(context, dataTypes);
+        const routerP = TaskManager.load(runtime, context);
 
         return runtime;
     }

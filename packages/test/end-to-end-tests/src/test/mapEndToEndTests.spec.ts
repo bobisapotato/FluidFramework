@@ -12,19 +12,26 @@ import { requestFluidObject } from "@fluidframework/runtime-utils";
 import {
     ChannelFactoryRegistry,
     ITestFluidObject,
-    OpProcessingController,
 } from "@fluidframework/test-utils";
-import { generateTestWithCompat, ICompatLocalTestObjectProvider, ITestContainerConfig } from "./compatUtils";
+import {
+    generateTest,
+    ITestObjectProvider,
+    ITestContainerConfig,
+    DataObjectFactoryType,
+} from "./compatUtils";
 
 const mapId = "mapKey";
 const registry: ChannelFactoryRegistry = [[mapId, SharedMap.getFactory()]];
 const testContainerConfig: ITestContainerConfig = {
-    testFluidDataObject: true,
+    fluidDataObjectType: DataObjectFactoryType.Test,
     registry,
 };
 
-const tests = (args: ICompatLocalTestObjectProvider) => {
-    let opProcessingController: OpProcessingController;
+const tests = (argsFactory: () => ITestObjectProvider) => {
+    let args: ITestObjectProvider;
+    beforeEach(()=>{
+        args = argsFactory();
+    });
     let dataObject1: ITestFluidObject;
     let sharedMap1: ISharedMap;
     let sharedMap2: ISharedMap;
@@ -43,16 +50,9 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         const dataObject3 = await requestFluidObject<ITestFluidObject>(container3, "default");
         sharedMap3 = await dataObject3.getSharedObject<SharedMap>(mapId);
 
-        opProcessingController = new OpProcessingController(args.deltaConnectionServer);
-        opProcessingController.addDeltaManagers(
-            dataObject1.runtime.deltaManager,
-            dataObject2.runtime.deltaManager,
-            dataObject3.runtime.deltaManager,
-        );
-
         sharedMap1.set("testKey1", "testValue");
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
     });
 
     function expectAllValues(msg, key, value1, value2, value3) {
@@ -93,7 +93,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         sharedMap2.set("testKey1", undefined);
         sharedMap2.set("testKey2", undefined);
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         expectAllAfterValues("testKey1", undefined);
         expectAllAfterValues("testKey2", undefined);
@@ -102,7 +102,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
     it("Should delete values in 3 containers correctly", async () => {
         sharedMap2.delete("testKey1");
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         const hasKey1 = sharedMap1.has("testKey1");
         assert.equal(hasKey1, false, "testKey1 not deleted in container 1");
@@ -117,7 +117,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
     it("Should check if three containers has same number of keys", async () => {
         sharedMap3.set("testKey3", true);
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         expectAllSize(2);
     });
@@ -128,6 +128,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         let user3ValueChangedCount: number = 0;
         sharedMap1.on("valueChanged", (changed, local, msg) => {
             if (!local) {
+                assert(msg);
                 if (msg.type === MessageType.Operation) {
                     assert.equal(changed.key, "testKey1", "Incorrect value for testKey1 in container 1");
                     user1ValueChangedCount = user1ValueChangedCount + 1;
@@ -136,6 +137,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         });
         sharedMap2.on("valueChanged", (changed, local, msg) => {
             if (!local) {
+                assert(msg);
                 if (msg.type === MessageType.Operation) {
                     assert.equal(changed.key, "testKey1", "Incorrect value for testKey1 in container 2");
                     user2ValueChangedCount = user2ValueChangedCount + 1;
@@ -144,6 +146,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         });
         sharedMap3.on("valueChanged", (changed, local, msg) => {
             if (!local) {
+                assert(msg);
                 if (msg.type === MessageType.Operation) {
                     assert.equal(changed.key, "testKey1", "Incorrect value for testKey1 in container 3");
                     user3ValueChangedCount = user3ValueChangedCount + 1;
@@ -153,7 +156,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
 
         sharedMap1.set("testKey1", "updatedValue");
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         assert.equal(user1ValueChangedCount, 0, "Incorrect number of valueChanged op received in container 1");
         assert.equal(user2ValueChangedCount, 1, "Incorrect number of valueChanged op received in container 2");
@@ -170,7 +173,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
 
         expectAllBeforeValues("testKey1", "value1", "value2", "value3");
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         expectAllAfterValues("testKey1", "value3");
     });
@@ -183,7 +186,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
 
         expectAllBeforeValues("testKey1", "value1.1", undefined, "value1.3");
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         expectAllAfterValues("testKey1", "value1.3");
     });
@@ -195,12 +198,12 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         sharedMap3.set("testKey2", "value2.3");
 
         // drain the outgoing so that the next set will come after
-        await opProcessingController.processOutgoing();
+        await args.opProcessingController.processOutgoing();
 
         sharedMap2.set("testKey2", "value2.2");
         expectAllBeforeValues("testKey2", "value2.1", "value2.2", "value2.3");
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         expectAllAfterValues("testKey2", "value2.2");
     });
@@ -213,7 +216,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
 
         expectAllBeforeValues("testKey3", "value3.1", "value3.2", undefined);
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         expectAllAfterValues("testKey3", undefined);
     });
@@ -226,7 +229,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         expectAllBeforeValues("testKey1", "value1.1", "value1.2", undefined);
         assert.equal(sharedMap3.size, 0, "Incorrect map size after clear");
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         expectAllAfterValues("testKey1", undefined);
         expectAllSize(0);
@@ -239,12 +242,12 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         sharedMap3.set("testKey2", "value2.3");
 
         // drain the outgoing so that the next set will come after
-        await opProcessingController.processOutgoing();
+        await args.opProcessingController.processOutgoing();
 
         sharedMap2.set("testKey2", "value2.2");
         expectAllBeforeValues("testKey2", "value2.1", "value2.2", "value2.3");
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         expectAllAfterValues("testKey2", "value2.2");
         expectAllSize(1);
@@ -257,7 +260,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         sharedMap3.set("testKey3", "value3.3");
         expectAllBeforeValues("testKey3", "value3.1", undefined, "value3.3");
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         expectAllAfterValues("testKey3", "value3.3");
         expectAllSize(1);
@@ -269,7 +272,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
          * https://github.com/microsoft/FluidFramework/issues/2400
          *
          * - A SharedMap in local (detached) state set a key.
-         * - The map is then attached so that it is avaible to remote clients.
+         * - The map is then attached so that it is available to remote clients.
          * - One of the remote clients sets a new value to the same key.
          * - The expected behavior is that the first SharedMap updates the key with the new value. But in the bug
          *   the first SharedMap stores the key in its pending state even though it does not send out an op. So,
@@ -285,17 +288,18 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         // Now add the handle to an attached map so the new map gets attached too.
         sharedMap1.set("newSharedMap", newSharedMap1.handle);
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
-        // The new map should be availble in the remote client and it should contain that key that was
+        // The new map should be available in the remote client and it should contain that key that was
         // set in local state.
-        const newSharedMap2 = await sharedMap2.get<IFluidHandle<SharedMap>>("newSharedMap").get();
+        const newSharedMap2 = await sharedMap2.get<IFluidHandle<SharedMap>>("newSharedMap")?.get();
+        assert(newSharedMap2);
         assert.equal(newSharedMap2.get("newKey"), "newValue", "The data set in local state is not available in map 2");
 
         // Set a new value for the same key in the remote map.
         newSharedMap2.set("newKey", "anotherNewValue");
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         // Verify that the new value is updated in both the maps.
         assert.equal(newSharedMap2.get("newKey"), "anotherNewValue", "The new value is not updated in map 2");
@@ -304,5 +308,5 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
 };
 
 describe("Map", () => {
-    generateTestWithCompat(tests);
+    generateTest(tests, { tinylicious: true });
 });

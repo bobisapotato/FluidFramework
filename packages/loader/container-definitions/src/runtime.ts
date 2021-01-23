@@ -9,13 +9,14 @@ import {
     IFluidConfiguration,
     IRequest,
     IResponse,
+    IFluidCodeDetails,
 } from "@fluidframework/core-interfaces";
 import { IDocumentStorageService } from "@fluidframework/driver-definitions";
 import {
+    IClientConfiguration,
     IClientDetails,
     IQuorum,
     ISequencedDocumentMessage,
-    IServiceConfiguration,
     ISnapshotTree,
     ITree,
     MessageType,
@@ -26,7 +27,7 @@ import {
 import { IAudience } from "./audience";
 import { IDeltaManager } from "./deltas";
 import { ICriticalContainerError, ContainerWarning } from "./error";
-import { ICodeLoader, ILoader } from "./loader";
+import { ILoader, ILoaderOptions } from "./loader";
 
 // Represents the attachment state of the entity.
 export enum AttachState {
@@ -113,11 +114,11 @@ export interface IRuntime extends IDisposable {
 export interface IContainerContext extends IDisposable {
     readonly id: string;
     readonly existing: boolean | undefined;
-    readonly options: any;
+    readonly options: ILoaderOptions;
     readonly configuration: IFluidConfiguration;
     readonly clientId: string | undefined;
     readonly clientDetails: IClientDetails;
-    readonly parentBranch: string | null;
+    readonly codeDetails: IFluidCodeDetails;
     readonly storage: IDocumentStorageService | undefined | null;
     readonly connected: boolean;
     readonly branch: string;
@@ -130,9 +131,8 @@ export interface IContainerContext extends IDisposable {
     readonly quorum: IQuorum;
     readonly audience: IAudience | undefined;
     readonly loader: ILoader;
-    readonly codeLoader: ICodeLoader;
     readonly logger: ITelemetryLogger;
-    readonly serviceConfiguration: IServiceConfiguration | undefined;
+    readonly serviceConfiguration: IClientConfiguration | undefined;
     readonly version: string;
     readonly previousRuntimeState: IRuntimeState;
 

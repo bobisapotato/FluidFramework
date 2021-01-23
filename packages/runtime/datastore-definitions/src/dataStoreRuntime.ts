@@ -3,8 +3,7 @@
  * Licensed under the MIT License.
  */
 
-import { EventEmitter } from "events";
-import { IDisposable, ITelemetryLogger } from "@fluidframework/common-definitions";
+import { IDisposable, IEvent, IEventProvider, ITelemetryLogger } from "@fluidframework/common-definitions";
 import {
     IFluidHandleContext,
     IFluidSerializer,
@@ -17,6 +16,7 @@ import {
     ContainerWarning,
     ILoader,
     AttachState,
+    ILoaderOptions,
 } from "@fluidframework/container-definitions";
 import {
     IDocumentMessage,
@@ -26,12 +26,22 @@ import {
 import { IInboundSignalMessage, IProvideFluidDataStoreRegistry } from "@fluidframework/runtime-definitions";
 import { IChannel } from ".";
 
+export interface IFluidDataStoreRuntimeEvents extends IEvent {
+    (
+        event: "disconnected" | "dispose" | "leader" | "notleader" | "attaching" | "attached",
+        listener: () => void,
+    );
+    (event: "op", listener: (message: ISequencedDocumentMessage) => void);
+    (event: "signal", listener: (message: IInboundSignalMessage, local: boolean) => void);
+    (event: "connected", listener: (clientId: string) => void);
+}
+
 /**
  * Represents the runtime for the data store. Contains helper functions/state of the data store.
  */
 export interface IFluidDataStoreRuntime extends
     IFluidRouter,
-    EventEmitter,
+    IEventProvider<IFluidDataStoreRuntimeEvents>,
     IDisposable,
     Partial<IProvideFluidDataStoreRegistry> {
 
@@ -45,7 +55,7 @@ export interface IFluidDataStoreRuntime extends
     readonly channelsRoutingContext: IFluidHandleContext;
     readonly objectsRoutingContext: IFluidHandleContext;
 
-    readonly options: any;
+    readonly options: ILoaderOptions;
 
     readonly deltaManager: IDeltaManager<ISequencedDocumentMessage, IDocumentMessage>;
 
@@ -54,8 +64,6 @@ export interface IFluidDataStoreRuntime extends
     readonly documentId: string;
 
     readonly existing: boolean;
-
-    readonly parentBranch: string | null;
 
     readonly connected: boolean;
 
@@ -67,14 +75,6 @@ export interface IFluidDataStoreRuntime extends
      * Indicates the attachment state of the data store to a host service.
      */
     readonly attachState: AttachState;
-
-    on(
-        event: "disconnected" | "dispose" | "leader" | "notleader" | "attaching" | "attached",
-        listener: () => void,
-    ): this;
-    on(event: "op", listener: (message: ISequencedDocumentMessage) => void): this;
-    on(event: "signal", listener: (message: IInboundSignalMessage, local: boolean) => void): this;
-    on(event: "connected", listener: (clientId: string) => void): this;
 
     /**
      * Returns the channel with the given id
@@ -93,12 +93,6 @@ export interface IFluidDataStoreRuntime extends
      * is attached then we attach the channel to make it live.
      */
     bindChannel(channel: IChannel): void;
-
-    /**
-     * Api for generating the snapshot of the data store.
-     * @param message - Message for the snapshot.
-     */
-    snapshot(message: string): Promise<void>;
 
     // Blob related calls
     /**

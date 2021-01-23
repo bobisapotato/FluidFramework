@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
+import { assert } from "@fluidframework/common-utils";
 import { ChildLogger } from "@fluidframework/telemetry-utils";
 import { IFluidDataStoreRuntime, IChannelStorageService } from "@fluidframework/datastore-definitions";
 import { ITelemetryBaseLogger } from "@fluidframework/common-definitions";
@@ -20,7 +20,7 @@ import {
     LocalReference,
     ReferenceType,
 } from "@fluidframework/merge-tree";
-import { IFluidHandle } from "@fluidframework/core-interfaces";
+import { IFluidHandle, IFluidSerializer } from "@fluidframework/core-interfaces";
 import { FileMode, TreeEntry, ITree } from "@fluidframework/protocol-definitions";
 import { ObjectStoragePartition } from "@fluidframework/runtime-utils";
 import { HandleTable, Handle, isHandleValid } from "./handletable";
@@ -54,7 +54,7 @@ export class PermutationSegment extends BaseSegment {
 
     public get start() { return this._start; }
     public set start(value: Handle) {
-        assert.equal(this._start, Handle.unallocated);
+        assert(this._start === Handle.unallocated);
         assert(isHandleValid(value));
 
         this._start = value;
@@ -266,27 +266,30 @@ export class PermutationVector extends Client {
     }
 
     // Constructs an ITreeEntry for the cell data.
-    public snapshot(runtime: IFluidDataStoreRuntime, handle: IFluidHandle): ITree {
+    public snapshot(runtime: IFluidDataStoreRuntime, handle: IFluidHandle, serializer: IFluidSerializer): ITree {
         return {
             entries: [
                 {
                     mode: FileMode.Directory,
                     path: SnapshotPath.segments,
                     type: TreeEntry.Tree,
-                    value: super.snapshot(runtime, handle, /* catchUpMsgs: */[]),
+                    value: super.snapshot(runtime, handle, serializer, /* catchUpMsgs: */[]),
                 },
-                serializeBlob(runtime, handle, SnapshotPath.handleTable, this.handleTable.snapshot()),
+                serializeBlob(handle, SnapshotPath.handleTable, this.handleTable.snapshot(), serializer),
             ],
-            id: null,   // eslint-disable-line no-null/no-null
         };
     }
 
-    public async load(runtime: IFluidDataStoreRuntime, storage: IChannelStorageService, branchId?: string) {
-        const handleTableData = await deserializeBlob(runtime, storage, SnapshotPath.handleTable);
+    public async load(
+        runtime: IFluidDataStoreRuntime,
+        storage: IChannelStorageService,
+        serializer: IFluidSerializer,
+    ) {
+        const handleTableData = await deserializeBlob(storage, SnapshotPath.handleTable, serializer);
 
         this.handleTable = HandleTable.load<never>(handleTableData);
 
-        return super.load(runtime, new ObjectStoragePartition(storage, SnapshotPath.segments), branchId);
+        return super.load(runtime, new ObjectStoragePartition(storage, SnapshotPath.segments), serializer);
     }
 
     private readonly onDelta = (
@@ -346,7 +349,7 @@ export class PermutationVector extends Client {
             }
 
             default:
-                assert.fail();
+                throw new Error("Unhandled MergeTreeDeltaType");
         }
     };
 

@@ -4,21 +4,22 @@
  */
 
 import { EventEmitter } from "events";
-import uuid from "uuid";
+import { v4 as uuid } from "uuid";
 import { ITelemetryBaseLogger, ITelemetryLogger } from "@fluidframework/common-definitions";
 import {
     IFluidObject,
     IRequest,
     IResponse,
     IFluidRouter,
+    IFluidCodeDetails,
 } from "@fluidframework/core-interfaces";
 import {
     ICodeLoader,
     IContainer,
     ILoader,
+    ILoaderOptions,
     IProxyLoaderFactory,
     LoaderHeader,
-    IFluidCodeDetails,
 } from "@fluidframework/container-definitions";
 import { Deferred, performance } from "@fluidframework/common-utils";
 import { ChildLogger, DebugLogger, PerformanceEvent } from "@fluidframework/telemetry-utils";
@@ -161,7 +162,7 @@ export interface ILoaderProps {
      * A property bag of options used by various layers
      * to control features
      */
-    readonly options?: any;
+    readonly options?: ILoaderOptions;
 
     /**
      * Scope is provided to all container and is a set of shared
@@ -207,7 +208,7 @@ export interface ILoaderServices {
      * A property bag of options used by various layers
      * to control features
      */
-    readonly options: any;
+    readonly options: ILoaderOptions;
 
     /**
      * Scope is provided to all container and is a set of shared
@@ -242,7 +243,7 @@ export class Loader extends EventEmitter implements ILoader {
         resolver: IUrlResolver | IUrlResolver[],
         documentServiceFactory: IDocumentServiceFactory | IDocumentServiceFactory[],
         codeLoader: ICodeLoader,
-        options: any,
+        options: ILoaderOptions,
         scope: IFluidObject,
         proxyLoaderFactories: Map<string, IProxyLoaderFactory>,
         logger?: ITelemetryBaseLogger,
@@ -330,7 +331,7 @@ export class Loader extends EventEmitter implements ILoader {
             const resolvedAsFluid = resolved as IFluidResolvedUrl;
             const parsed = parseUrl(resolvedAsFluid.url);
             if (parsed === undefined) {
-                return Promise.reject(`Invalid URL ${resolvedAsFluid.url}`);
+                return Promise.reject(new Error(`Invalid URL ${resolvedAsFluid.url}`));
             }
             const { fromSequenceNumber } =
                 this.parseHeader(parsed, { url: baseUrl, headers: request.headers });
@@ -360,7 +361,7 @@ export class Loader extends EventEmitter implements ILoader {
         // Parse URL into data stores
         const parsed = parseUrl(resolvedAsFluid.url);
         if (parsed === undefined) {
-            return Promise.reject(`Invalid URL ${resolvedAsFluid.url}`);
+            return Promise.reject(new Error(`Invalid URL ${resolvedAsFluid.url}`));
         }
 
         request.headers = request.headers ?? {};
@@ -392,7 +393,7 @@ export class Loader extends EventEmitter implements ILoader {
         }
 
         if (container.deltaManager.lastSequenceNumber <= fromSequenceNumber) {
-            await new Promise((resolve, reject) => {
+            await new Promise<void>((resolve, reject) => {
                 function opHandler(message: ISequencedDocumentMessage) {
                     if (message.sequenceNumber > fromSequenceNumber) {
                         resolve();

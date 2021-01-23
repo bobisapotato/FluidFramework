@@ -3,12 +3,11 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
-import { IFluidHandle } from "@fluidframework/core-interfaces";
+import { IFluidHandle, IFluidSerializer } from "@fluidframework/core-interfaces";
 import { ISequencedDocumentMessage, MessageType } from "@fluidframework/protocol-definitions";
 import { IFluidDataStoreRuntime, IChannelStorageService } from "@fluidframework/datastore-definitions";
 import { ITelemetryLogger } from "@fluidframework/common-definitions";
-import { Trace } from "@fluidframework/common-utils";
+import { assert, Trace } from "@fluidframework/common-utils";
 import { IIntegerRange } from "./base";
 import * as Collections from "./collections";
 import { UnassignedSequenceNumber, UniversalSequenceNumber } from "./constants";
@@ -42,7 +41,7 @@ import {
 
 export class Client {
     public verboseOps = false;
-    public noVerboseRemoteAnnote = false;
+    public noVerboseRemoteAnnotate = false;
     public measureOps = false;
     public registerCollection = new RegisterCollection();
     public accumTime = 0;
@@ -52,16 +51,18 @@ export class Client {
     public accumWindow = 0;
     public accumOps = 0;
     public maxWindowTime = 0;
-    public longClientId: string;
+    public longClientId: string | undefined;
 
-    get mergeTreeDeltaCallback(): MergeTreeDeltaCallback { return this.mergeTree.mergeTreeDeltaCallback; }
-    set mergeTreeDeltaCallback(callback: MergeTreeDeltaCallback) { this.mergeTree.mergeTreeDeltaCallback = callback; }
+    get mergeTreeDeltaCallback(): MergeTreeDeltaCallback | undefined { return this.mergeTree.mergeTreeDeltaCallback; }
+    set mergeTreeDeltaCallback(callback: MergeTreeDeltaCallback | undefined) {
+        this.mergeTree.mergeTreeDeltaCallback = callback;
+    }
 
-    get mergeTreeMaintenanceCallback(): MergeTreeMaintenanceCallback {
+    get mergeTreeMaintenanceCallback(): MergeTreeMaintenanceCallback | undefined {
         return this.mergeTree.mergeTreeMaintenanceCallback;
     }
 
-    set mergeTreeMaintenanceCallback(callback: MergeTreeMaintenanceCallback) {
+    set mergeTreeMaintenanceCallback(callback: MergeTreeMaintenanceCallback | undefined) {
         this.mergeTree.mergeTreeMaintenanceCallback = callback;
     }
 
@@ -114,7 +115,7 @@ export class Client {
     public annotateMarkerNotifyConsensus(
         marker: Marker,
         props: Properties.PropertySet,
-        consensusCallback: (m: Marker) => void): ops.IMergeTreeAnnotateMsg {
+        consensusCallback: (m: Marker) => void): ops.IMergeTreeAnnotateMsg | undefined {
         const combiningOp: ops.ICombiningOp = {
             name: "consensus",
         };
@@ -143,7 +144,7 @@ export class Client {
     public annotateMarker(
         marker: Marker,
         props: Properties.PropertySet,
-        combiningOp: ops.ICombiningOp): ops.IMergeTreeAnnotateMsg {
+        combiningOp: ops.ICombiningOp): ops.IMergeTreeAnnotateMsg | undefined {
         const annotateOp =
             OpBuilder.createAnnotateMarkerOp(marker, props, combiningOp);
 
@@ -165,7 +166,7 @@ export class Client {
         start: number,
         end: number,
         props: Properties.PropertySet,
-        combiningOp: ops.ICombiningOp): ops.IMergeTreeAnnotateMsg {
+        combiningOp: ops.ICombiningOp): ops.IMergeTreeAnnotateMsg | undefined {
         const annotateOp = OpBuilder.createAnnotateRangeOp(
             start,
             end,
@@ -199,7 +200,7 @@ export class Client {
      * @param pos - The position to insert the segment at
      * @param segment - The segment to insert
      */
-    public insertSegmentLocal(pos: number, segment: ISegment): ops.IMergeTreeInsertMsg {
+    public insertSegmentLocal(pos: number, segment: ISegment): ops.IMergeTreeInsertMsg | undefined {
         if (segment.cachedLength <= 0) {
             return undefined;
         }
@@ -214,7 +215,10 @@ export class Client {
      * @param refPos - The reference position to insert the segment at
      * @param segment - The segment to insert
      */
-    public insertAtReferencePositionLocal(refPos: ReferencePosition, segment: ISegment): ops.IMergeTreeInsertMsg {
+    public insertAtReferencePositionLocal(
+        refPos: ReferencePosition,
+        segment: ISegment,
+    ): ops.IMergeTreeInsertMsg | undefined {
         const pos = this.mergeTree.referencePositionToLocalPosition(
             refPos,
             this.getCurrentSeq(),
@@ -228,7 +232,7 @@ export class Client {
             segment);
 
         const opArgs = { op };
-        let traceStart: Trace;
+        let traceStart: Trace | undefined;
         if (this.measureOps) {
             traceStart = Trace.start();
         }
@@ -288,7 +292,15 @@ export class Client {
         return this.mergeTree.getCollabWindow();
     }
 
+    /**
+     * Returns the current position of a segment, and -1 if the segment
+     * does not exist in this merge tree
+     * @param segment - The segment to get the position of
+     */
     public getPosition(segment: ISegment): number {
+        if (segment?.parent === undefined) {
+            return -1;
+        }
         return this.mergeTree.getPosition(segment, this.getCurrentSeq(), this.getClientId());
     }
 
@@ -319,8 +331,8 @@ export class Client {
      * @returns True if the annotate was applied. False if it could not be.
      */
     private applyRemoveRangeOp(opArgs: IMergeTreeDeltaOpArgs): boolean {
-        assert.equal(opArgs.op.type, ops.MergeTreeDeltaType.REMOVE);
-        const op = opArgs.op as ops.IMergeTreeRemoveMsg;
+        assert(opArgs.op.type === ops.MergeTreeDeltaType.REMOVE);
+        const op = opArgs.op;
         const clientArgs = this.getClientSequenceArgs(opArgs);
         const range = this.getValidOpRange(op, clientArgs);
         if (!range) {
@@ -332,7 +344,7 @@ export class Client {
             this.copy(range, op.register, clientArgs);
         }
 
-        let traceStart: Trace;
+        let traceStart: Trace | undefined;
         if (this.measureOps) {
             traceStart = Trace.start();
         }
@@ -357,8 +369,8 @@ export class Client {
      * @returns True if the annotate was applied. False if it could not be.
      */
     private applyAnnotateRangeOp(opArgs: IMergeTreeDeltaOpArgs): boolean {
-        assert.equal(opArgs.op.type, ops.MergeTreeDeltaType.ANNOTATE);
-        const op = opArgs.op as ops.IMergeTreeAnnotateMsg;
+        assert(opArgs.op.type === ops.MergeTreeDeltaType.ANNOTATE);
+        const op = opArgs.op;
         const clientArgs = this.getClientSequenceArgs(opArgs);
         const range = this.getValidOpRange(op, clientArgs);
 
@@ -366,7 +378,7 @@ export class Client {
             return false;
         }
 
-        let traceStart: Trace;
+        let traceStart: Trace | undefined;
         if (this.measureOps) {
             traceStart = Trace.start();
         }
@@ -392,8 +404,8 @@ export class Client {
      * @returns True if the insert was applied. False if it could not be.
      */
     private applyInsertOp(opArgs: IMergeTreeDeltaOpArgs): boolean {
-        assert.equal(opArgs.op.type, ops.MergeTreeDeltaType.INSERT);
-        const op = opArgs.op as ops.IMergeTreeInsertMsg;
+        assert(opArgs.op.type === ops.MergeTreeDeltaType.INSERT);
+        const op = opArgs.op;
         const clientArgs = this.getClientSequenceArgs(opArgs);
         const range = this.getValidOpRange(op, clientArgs);
 
@@ -401,7 +413,7 @@ export class Client {
             return false;
         }
 
-        let segments: ISegment[];
+        let segments: ISegment[] | undefined;
         if (op.seg) {
             segments = [this.specToSegment(op.seg)];
         } else if (op.register) {
@@ -423,7 +435,7 @@ export class Client {
             return false;
         }
 
-        let traceStart: Trace;
+        let traceStart: Trace | undefined;
         if (this.measureOps) {
             traceStart = Trace.start();
         }
@@ -469,7 +481,7 @@ export class Client {
                 this.accumWindow += (this.getCurrentSeq() - this.getCollabWindow().minSeq);
             }
         }
-        if (this.verboseOps && (!opArgs.sequencedMessage || !this.noVerboseRemoteAnnote)) {
+        if (this.verboseOps && (!opArgs.sequencedMessage || !this.noVerboseRemoteAnnotate)) {
             console.log(
                 `@cli ${this.getLongClientId(this.getCollabWindow().clientId)} ` +
                 `seq ${clientArgs.sequenceNumber} ${opArgs.op.type} local ${!opArgs.sequencedMessage} ` +
@@ -485,8 +497,8 @@ export class Client {
      */
     private getValidOpRange(
         op: ops.IMergeTreeAnnotateMsg | ops.IMergeTreeInsertMsg | ops.IMergeTreeRemoveMsg,
-        clientArgs: IMergeTreeClientSequenceArgs): IIntegerRange {
-        let start: number = op.pos1;
+        clientArgs: IMergeTreeClientSequenceArgs): IIntegerRange | undefined {
+        let start: number | undefined = op.pos1;
         if (start === undefined && op.relativePos1) {
             start = this.mergeTree.posFromRelativePos(
                 op.relativePos1,
@@ -494,7 +506,7 @@ export class Client {
                 clientArgs.clientId);
         }
 
-        let end: number = op.pos2;
+        let end: number | undefined = op.pos2;
         if (end === undefined && op.relativePos2) {
             end = this.mergeTree.posFromRelativePos(
                 op.relativePos2,
@@ -548,8 +560,8 @@ export class Client {
     }
 
     /**
-     * Get's the client args from the op if remote, otherwise uses the local clients info
-     * @param opArgs - The op arge to get the client sequence args for
+     * Gets the client args from the op if remote, otherwise uses the local clients info
+     * @param opArgs - The op arg to get the client sequence args for
      */
     private getClientSequenceArgs(opArgs: IMergeTreeDeltaOpArgs): IMergeTreeClientSequenceArgs {
         // If there this no sequenced message, then the op is local
@@ -588,7 +600,7 @@ export class Client {
 
     private ackPendingSegment(opArgs: IMergeTreeDeltaOpArgs) {
         const ackOp = (deltaOpArgs: IMergeTreeDeltaOpArgs) => {
-            let trace: Trace;
+            let trace: Trace | undefined;
             if (this.measureOps) {
                 trace = Trace.start();
             }
@@ -600,7 +612,7 @@ export class Client {
                 }
             }
 
-            if (this.measureOps) {
+            if (trace) {
                 this.accumTime += elapsedMicroseconds(trace);
                 this.accumOps++;
                 this.accumWindow += (this.getCurrentSeq() - this.getCollabWindow().minSeq);
@@ -709,14 +721,14 @@ export class Client {
     private resetPendingDeltaToOps(
         resetOp: ops.IMergeTreeDeltaOp,
         segmentGroup: SegmentGroup): ops.IMergeTreeDeltaOp[] {
-        assert(segmentGroup, "Segment group undefined");
+        assert(!!segmentGroup, "Segment group undefined");
         const NACKedSegmentGroup = this.mergeTree.pendingSegments.dequeue();
         assert(segmentGroup === NACKedSegmentGroup, "Segment group not at head of merge tree pending queue");
 
         const opList = [];
         // We need to sort the segments by ordinal, as the segments are not sorted in the segment group.
-        // The reason they need them sorted, as they have the same local sequnence number and which means
-        // farther segments will  take into account nearer segements when calcualting their position.
+        // The reason they need them sorted, as they have the same local sequence number and which means
+        // farther segments will  take into account nearer segments when calculating their position.
         // By sorting we ensure the nearer segment will be applied and sequenced before the father segments
         // so their recalulated positions will be correct.
         for (const segment of segmentGroup.segments.sort((a, b) => a.ordinal < b.ordinal ? -1 : 1)) {
@@ -724,10 +736,11 @@ export class Client {
             assert(segmentGroup === segmentSegGroup,
                 "Segment group not at head of segment pending queue");
             const segmentPosition = this.findReconnectionPostition(segment, segmentGroup.localSeq);
-            let newOp: ops.IMergeTreeDeltaOp;
+            let newOp: ops.IMergeTreeDeltaOp | undefined;
             switch (resetOp.type) {
                 case ops.MergeTreeDeltaType.ANNOTATE:
-                    assert(segment.propertyManager.hasPendingProperties(), "Segment has no pending properties");
+                    assert(segment.propertyManager?.hasPendingProperties() === true,
+                        "Segment has no pending properties");
                     newOp = OpBuilder.createAnnotateRangeOp(
                         segmentPosition,
                         segmentPosition + segment.cachedLength,
@@ -839,7 +852,7 @@ export class Client {
     public resolveRemoteClientPosition(
         remoteClientPosition: number,
         remoteClientRefSeq: number,
-        remoteClientId: string): number {
+        remoteClientId: string): number | undefined {
         const shortRemoteClientId = this.getOrAddShortClientId(remoteClientId);
         return this.mergeTree.resolveRemoteClientPosition(
             remoteClientPosition,
@@ -863,7 +876,7 @@ export class Client {
 
             if (resetOp.type === ops.MergeTreeDeltaType.GROUP) {
                 if (Array.isArray(segmentGroup)) {
-                    assert.equal(resetOp.ops.length, segmentGroup.length,
+                    assert(resetOp.ops.length === segmentGroup.length,
                         "Number of ops in 'resetOp' must match the number of segment groups provided.");
 
                     for (let i = 0; i < resetOp.ops.length; i++) {
@@ -873,12 +886,12 @@ export class Client {
                 } else {
                     // A group op containing a single op will pass a direct reference to 'segmentGroup'
                     // rather than an array of segment groups.  (See 'peekPendingSegmentGroups()')
-                    assert.equal(resetOp.ops.length, 1,
+                    assert(resetOp.ops.length === 1,
                         "Number of ops in 'resetOp' must match the number of segment groups provided.");
                     opList.push(...this.resetPendingDeltaToOps(resetOp.ops[0], segmentGroup));
                 }
             } else {
-                assert.notEqual(resetOp.type, ops.MergeTreeDeltaType.GROUP);
+                assert((resetOp.type as any) !== ops.MergeTreeDeltaType.GROUP);
                 assert(!Array.isArray(segmentGroup));
                 opList.push(
                     ...this.resetPendingDeltaToOps(resetOp, segmentGroup));
@@ -899,7 +912,12 @@ export class Client {
 
     // TODO: Remove `catchUpMsgs` once new snapshot format is adopted as default.
     //       (See https://github.com/microsoft/FluidFramework/issues/84)
-    public snapshot(runtime: IFluidDataStoreRuntime, handle: IFluidHandle, catchUpMsgs: ISequencedDocumentMessage[]) {
+    public snapshot(
+        runtime: IFluidDataStoreRuntime,
+        handle: IFluidHandle,
+        serializer: IFluidSerializer,
+        catchUpMsgs: ISequencedDocumentMessage[],
+    ) {
         const deltaManager = runtime.deltaManager;
         const minSeq = deltaManager.minimumSequenceNumber;
 
@@ -911,7 +929,7 @@ export class Client {
 
         // One of the snapshots (from SPO) I observed to have chunk.chunkSequenceNumber > minSeq!
         // Not sure why - need to catch it sooner
-        assert.equal(this.getCollabWindow().minSeq, minSeq);
+        assert(this.getCollabWindow().minSeq === minSeq);
 
         // TODO: Remove options flag once new snapshot format is adopted as default.
         //       (See https://github.com/microsoft/FluidFramework/issues/84)
@@ -921,27 +939,22 @@ export class Client {
                 "New format should not emit catchup ops");
             const snap = new SnapshotV1(this.mergeTree, this.logger);
             snap.extractSync();
-            return snap.emit(
-                runtime.IFluidSerializer,
-                handle);
+            return snap.emit(serializer, handle);
         } else {
             const snap = new SnapshotLegacy(this.mergeTree, this.logger);
             snap.extractSync();
-            return snap.emit(
-                catchUpMsgs,
-                runtime.IFluidSerializer,
-                handle);
+            return snap.emit(catchUpMsgs, serializer, handle);
         }
     }
 
     public async load(
         runtime: IFluidDataStoreRuntime,
         storage: IChannelStorageService,
-        branchId?: string,
+        serializer: IFluidSerializer,
     ): Promise<{ catchupOpsP: Promise<ISequencedDocumentMessage[]> }> {
-        const loader = new SnapshotLoader(runtime, this, this.mergeTree, this.logger);
+        const loader = new SnapshotLoader(runtime, this, this.mergeTree, this.logger, serializer);
 
-        return loader.initialize(branchId, storage);
+        return loader.initialize(storage);
     }
 
     getStackContext(startPos: number, rangeLabels: string[]) {
@@ -988,12 +1001,12 @@ export class Client {
     }
 
     updateMinSeq(minSeq: number) {
-        let trace: Trace;
+        let trace: Trace | undefined;
         if (this.measureOps) {
             trace = Trace.start();
         }
         this.mergeTree.setMinSeq(minSeq);
-        if (this.measureOps) {
+        if (trace) {
             const elapsed = elapsedMicroseconds(trace);
             this.accumWindowTime += elapsed;
             if (elapsed > this.maxWindowTime) {
@@ -1014,7 +1027,7 @@ export class Client {
             console.log(`getPropertiesAtPosition cli ${this.getLongClientId(segWindow.clientId)} ref seq ${segWindow.currentSeq}`);
         }
 
-        let propertiesAtPosition: Properties.PropertySet;
+        let propertiesAtPosition: Properties.PropertySet | undefined;
         const segoff = this.getContainingSegment(pos);
         const seg = segoff.segment;
         if (seg) {
@@ -1029,8 +1042,8 @@ export class Client {
             console.log(`getRangeExtentsOfPosition cli ${this.getLongClientId(segWindow.clientId)} ref seq ${segWindow.currentSeq}`);
         }
 
-        let posStart: number;
-        let posAfterEnd: number;
+        let posStart: number | undefined;
+        let posAfterEnd: number | undefined;
 
         const segoff = this.getContainingSegment(pos);
         const seg = segoff.segment;
@@ -1063,7 +1076,8 @@ export class Client {
                     this.getShortClientId(this.longClientId), minSeq, currentSeq, branchId);
             } else {
                 const oldClientId = this.longClientId;
-                const oldData = this.clientNameToIds.get(oldClientId).data;
+                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+                const oldData = this.clientNameToIds.get(oldClientId)!.data;
                 this.longClientId = longClientId;
                 this.clientNameToIds.put(longClientId, oldData);
                 this.shortClientIdMap[oldData.clientId] = longClientId;

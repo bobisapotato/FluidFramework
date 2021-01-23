@@ -3,9 +3,9 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
-import { ISerializedHandle } from "@fluidframework/core-interfaces";
-import { fromBase64ToUtf8 } from "@fluidframework/common-utils";
+import { assert , fromBase64ToUtf8 } from "@fluidframework/common-utils";
+import { IFluidSerializer, ISerializedHandle } from "@fluidframework/core-interfaces";
+
 import {
     FileMode,
     ISequencedDocumentMessage,
@@ -50,7 +50,51 @@ interface ICellValue {
 const snapshotFileName = "header";
 
 /**
- * Implementation of a cell shared object
+ * The SharedCell distributed data structure can be used to store a single serializable value.
+ *
+ * @remarks
+ * ### Creation
+ *
+ * To create a `SharedCell`, call the static create method:
+ *
+ * ```typescript
+ * const myCell = SharedCell.create(this.runtime, id);
+ * ```
+ *
+ * ### Usage
+ *
+ * The value stored in the cell can be set with the `.set()` method and retrieved with the `.get()` method:
+ *
+ * ```typescript
+ * myCell.set(3);
+ * console.log(myCell.get()); // 3
+ * ```
+ *
+ * The value must only be plain JS objects or `SharedObject` handles (e.g. to another DDS or Fluid object).
+ * In collaborative scenarios, the value is settled with a policy of _last write wins_.
+ *
+ * The `.delete()` method will delete the stored value from the cell:
+ *
+ * ```typescript
+ * myCell.delete();
+ * console.log(myCell.get()); // undefined
+ * ```
+ *
+ * The `.empty()` method will check if the value is undefined.
+ *
+ * ```typescript
+ * if (myCell.empty()) {
+ *   // myCell.get() will return undefined
+ * } else {
+ *   // myCell.get() will return a non-undefined value
+ * }
+ * ```
+ *
+ * ### Eventing
+ *
+ * `SharedCell` is an `EventEmitter`, and will emit events when other clients make modifications. You should
+ * register for these events and respond appropriately as the data is modified. `valueChanged` will be emitted
+ * in response to a `set`, and `delete` will be emitted in response to a `delete`.
  */
 export class SharedCell<T extends Serializable = any> extends SharedObject<ISharedCellEvents<T>>
     implements ISharedCell<T> {
@@ -119,7 +163,7 @@ export class SharedCell<T extends Serializable = any> extends SharedObject<IShar
         // Serialize the value if required.
         const operationValue: ICellValue = {
             type: ValueType[ValueType.Plain],
-            value: this.toSerializable(value),
+            value: this.toSerializable(value, this.serializer),
         };
 
         // Set the value locally.
@@ -167,11 +211,11 @@ export class SharedCell<T extends Serializable = any> extends SharedObject<IShar
      *
      * @returns the snapshot of the current state of the cell
      */
-    public snapshot(): ITree {
+    protected snapshotCore(serializer: IFluidSerializer): ITree {
         // Get a serializable form of data
         const content: ICellValue = {
             type: ValueType[ValueType.Plain],
-            value: this.toSerializable(this.data),
+            value: this.toSerializable(this.data, serializer),
         };
 
         // And then construct the tree for it
@@ -187,23 +231,15 @@ export class SharedCell<T extends Serializable = any> extends SharedObject<IShar
                     },
                 },
             ],
-            // eslint-disable-next-line no-null/no-null
-            id: null,
         };
 
         return tree;
     }
 
     /**
-     * Load cell from snapshot
-     *
-     * @param branchId - Not used
-     * @param storage - the storage to get the snapshot from
-     * @returns - promise that resolved when the load is completed
+     * {@inheritDoc @fluidframework/shared-object-base#SharedObject.loadCore}
      */
-    protected async loadCore(
-        branchId: string | undefined,
-        storage: IChannelStorageService): Promise<void> {
+    protected async loadCore(storage: IChannelStorageService): Promise<void> {
         const rawContent = await storage.read(snapshotFileName);
 
         const content = rawContent !== undefined
@@ -286,16 +322,14 @@ export class SharedCell<T extends Serializable = any> extends SharedObject<IShar
         this.emit("delete");
     }
 
-    private toSerializable(value: T | undefined) {
+    private toSerializable(value: T | undefined, serializer: IFluidSerializer) {
         if (value === undefined) {
             return value;
         }
 
         // Stringify to convert to the serialized handle values - and then parse in order to create
         // a POJO for the op
-        const stringified = this.runtime.IFluidSerializer.stringify(
-            value,
-            this.handle);
+        const stringified = serializer.stringify(value, this.handle);
         // eslint-disable-next-line @typescript-eslint/no-unsafe-return
         return JSON.parse(stringified);
     }
@@ -314,7 +348,7 @@ export class SharedCell<T extends Serializable = any> extends SharedObject<IShar
 
         // eslint-disable-next-line @typescript-eslint/no-unsafe-return
         return value !== undefined
-            ? this.runtime.IFluidSerializer.parse(JSON.stringify(value))
+            ? this.serializer.parse(JSON.stringify(value))
             : value;
     }
 }

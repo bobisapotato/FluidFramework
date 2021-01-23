@@ -3,14 +3,14 @@
  * Licensed under the MIT License.
  */
 
-import assert from "assert";
 // eslint-disable-next-line import/no-internal-modules
 import cloneDeep from "lodash/cloneDeep";
 
 import { ITelemetryLogger } from "@fluidframework/common-definitions";
-import { performance } from "@fluidframework/common-utils";
+import { assert, performance } from "@fluidframework/common-utils";
 import { ChildLogger, TelemetryLogger } from "@fluidframework/telemetry-utils";
 import {
+    LoaderCachingPolicy,
     IDocumentDeltaConnection,
     IDocumentDeltaStorageService,
     IDocumentService,
@@ -37,6 +37,7 @@ import { getWithRetryForTokenRefresh, isLocalStorageAvailable } from "./odspUtil
 import { fetchJoinSession } from "./vroom";
 import { isOdcOrigin } from "./odspUrlHelper";
 import { TokenFetchOptions } from "./tokenFetch";
+import { EpochTracker } from "./epochTracker";
 
 const afdUrlConnectExpirationMs = 6 * 60 * 60 * 1000; // 6 hours
 const lastAfdConnectionTimeMsKey = "LastAfdConnectionTimeMs";
@@ -88,6 +89,11 @@ function writeLocalStorage(key: string, value: string) {
 export class OdspDocumentService implements IDocumentService {
     protected updateUsageOpFrequency = startingUpdateUsageOpFrequency;
 
+    readonly policies = {
+        // By default, ODSP tells the container not to prefetch/cache.
+        caching: LoaderCachingPolicy.NoCaching,
+    };
+
     /**
      * @param getStorageToken - function that can provide the storage token. This is is also referred to as
      * the "VROOM" token in SPO.
@@ -105,6 +111,7 @@ export class OdspDocumentService implements IDocumentService {
         socketIoClientFactory: () => Promise<SocketIOClientStatic>,
         cache: IOdspCache,
         hostPolicy: HostStoragePolicy,
+        epochTracker: EpochTracker,
     ): Promise<IDocumentService> {
         return new OdspDocumentService(
             resolvedUrl as IOdspResolvedUrl,
@@ -114,6 +121,7 @@ export class OdspDocumentService implements IDocumentService {
             socketIoClientFactory,
             cache,
             hostPolicy,
+            epochTracker,
         );
     }
 
@@ -148,7 +156,12 @@ export class OdspDocumentService implements IDocumentService {
         private readonly socketIoClientFactory: () => Promise<SocketIOClientStatic>,
         private readonly cache: IOdspCache,
         hostPolicy: HostStoragePolicy,
+        private readonly epochTracker: EpochTracker,
     ) {
+        epochTracker.fileEntry = {
+            resolvedUrl: odspResolvedUrl,
+            docId: odspResolvedUrl.hashedDocumentId,
+        };
         this.joinSessionKey = `${this.odspResolvedUrl.hashedDocumentId}/joinsession`;
         this.isOdc = isOdcOrigin(new URL(this.odspResolvedUrl.endpoints.snapshotStorageUrl).origin);
         this.logger = ChildLogger.create(logger,
@@ -182,6 +195,7 @@ export class OdspDocumentService implements IDocumentService {
                 true,
                 this.cache,
                 this.hostPolicy,
+                this.epochTracker,
             );
         }
 
@@ -203,6 +217,7 @@ export class OdspDocumentService implements IDocumentService {
             urlProvider,
             this.storageManager?.ops,
             this.getStorageToken,
+            this.epochTracker,
             this.logger,
         );
 
@@ -223,8 +238,8 @@ export class OdspDocumentService implements IDocumentService {
     public async connectToDeltaStream(client: IClient): Promise<IDocumentDeltaConnection> {
         // Attempt to connect twice, in case we used expired token.
         return getWithRetryForTokenRefresh<IDocumentDeltaConnection>(async (options) => {
-            // For ODC, we just use the token from joinsession
-            const socketTokenPromise = this.isOdc ? Promise.resolve("") : this.getWebsocketToken(options);
+            // For ODC, we do not rely on getWebsocketToken callback and just use the token from joinsession
+            const socketTokenPromise = this.isOdc ? Promise.resolve(null) : this.getWebsocketToken(options);
             const [websocketEndpoint, webSocketToken, io] =
                 await Promise.all([this.joinSession(), socketTokenPromise, this.socketIoClientFactory()]);
 
@@ -246,7 +261,8 @@ export class OdspDocumentService implements IDocumentService {
                 const connection = await this.connectToDeltaStreamWithRetry(
                     websocketEndpoint.tenantId,
                     websocketEndpoint.id,
-                    webSocketToken,
+                    // Accounts for ODC where websocket token is returned as part of joinsession response payload
+                    webSocketToken ?? (websocketEndpoint.socketToken || null),
                     io,
                     client,
                     websocketEndpoint.deltaStreamSocketUrl,
@@ -257,13 +273,12 @@ export class OdspDocumentService implements IDocumentService {
                 return connection;
             } catch (error) {
                 this.cache.sessionJoinCache.remove(this.joinSessionKey);
+                if (typeof error === "object" && error !== null) {
+                    error.socketDocumentId = websocketEndpoint.id;
+                }
                 throw error;
             }
         });
-    }
-
-    public async branch(): Promise<string> {
-        return "";
     }
 
     public getErrorTrackingService(): IErrorTrackingService {
@@ -280,6 +295,7 @@ export class OdspDocumentService implements IDocumentService {
                 "POST",
                 this.logger,
                 this.getStorageToken,
+                this.epochTracker,
             );
 
         // Note: The sessionCache is configured with a sliding expiry of 1 hour,
@@ -310,6 +326,8 @@ export class OdspDocumentService implements IDocumentService {
     ): Promise<IDocumentDeltaConnection> {
         const connectWithNonAfd = async () => {
             const startTime = performance.now();
+            // pushV2 websocket urls will contain pushf
+            const pushV2 = nonAfdUrl.includes("pushf");
             try {
                 const connection = await OdspDocumentDeltaConnection.create(
                     tenantId,
@@ -318,13 +336,14 @@ export class OdspDocumentService implements IDocumentService {
                     io,
                     client,
                     nonAfdUrl,
-                    20000,
                     this.logger,
+                    60000,
                 );
                 const endTime = performance.now();
                 this.logger.sendPerformanceEvent({
                     eventName: "NonAfdConnectionSuccess",
                     duration: endTime - startTime,
+                    pushV2,
                 });
                 return connection;
             } catch (connectionError) {
@@ -336,6 +355,7 @@ export class OdspDocumentService implements IDocumentService {
                         eventName: "NonAfdConnectionFail",
                         canRetry,
                         duration: endTime - startTime,
+                        pushV2,
                     },
                     connectionError,
                 );
@@ -355,8 +375,8 @@ export class OdspDocumentService implements IDocumentService {
                     io,
                     client,
                     afdUrl,
-                    20000,
                     this.logger,
+                    60000,
                 );
                 const endTime = performance.now();
                 // Set the successful connection attempt in the cache so we can skip the non-AFD failure the next time

@@ -5,7 +5,6 @@
 
 import { strict as assert } from "assert";
 import { fromBase64ToUtf8 } from "@fluidframework/common-utils";
-import { IFluidCodeDetails } from "@fluidframework/container-definitions";
 import { Loader } from "@fluidframework/container-loader";
 import { IUrlResolver } from "@fluidframework/driver-definitions";
 import { LocalDocumentServiceFactory, LocalResolver } from "@fluidframework/local-driver";
@@ -27,7 +26,7 @@ import { Ink } from "@fluidframework/ink";
 import { SharedMatrix } from "@fluidframework/matrix";
 import { ConsensusQueue, ConsensusOrderedCollection } from "@fluidframework/ordered-collection";
 import { SharedCounter } from "@fluidframework/counter";
-import { IRequest } from "@fluidframework/core-interfaces";
+import { IRequest, IFluidCodeDetails } from "@fluidframework/core-interfaces";
 import { requestFluidObject } from "@fluidframework/runtime-utils";
 
 const detachedContainerRefSeqNumber = 0;
@@ -52,7 +51,7 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
     let testDeltaConnectionServer: ILocalDeltaConnectionServer;
     let loader: Loader;
     let request: IRequest;
-
+    let opProcessingController: OpProcessingController;
     async function createDetachedContainerAndGetRootDataStore() {
         const container = await loader.createDetachedContainer(codeDetails);
         // Get the root dataStore from the detached container.
@@ -103,6 +102,7 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
         const urlResolver = new LocalResolver();
         request = urlResolver.createCreateNewRequest(documentId);
         loader = createTestLoader(urlResolver);
+        opProcessingController = new OpProcessingController(testDeltaConnectionServer);
     });
 
     it("Dehydrated container snapshot", async () => {
@@ -110,8 +110,9 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
             await createDetachedContainerAndGetRootDataStore();
         const snapshotTree = JSON.parse(container.serialize());
 
-        assert.strictEqual(Object.keys(snapshotTree.trees).length, 3,
-            "3 trees should be there(protocol, default dataStore, scheduler");
+        assert.ok(snapshotTree.trees[".protocol"], "protocol tree not present");
+        assert.ok(snapshotTree.trees.default, "default dataStore tree not present");
+        assert.ok(snapshotTree.trees._scheduler, "scheduler tree not present");
         assert.strictEqual(Object.keys(snapshotTree.trees[".protocol"].blobs).length, 8,
             "4 protocol blobs should be there(8 mappings)");
 
@@ -176,7 +177,15 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
 
         const snapshotTree = JSON.parse(container.serialize());
 
-        assert.strictEqual(Object.keys(snapshotTree.trees).length, 4, "4 trees should be there");
+        assert.ok(snapshotTree.trees[".protocol"], "protocol tree not present");
+        assert.ok(snapshotTree.trees.default, "default dataStore tree not present");
+        assert.ok(snapshotTree.trees._scheduler, "scheduler tree not present");
+        assert.ok(
+            // eslint-disable-next-line unicorn/no-unsafe-regex
+            Object.keys(snapshotTree.trees).some((key) => /^(?:\w+-){4}\w+$/.test(key)),
+            "peer data store tree not present",
+        );
+
         assert(snapshotTree.trees[dataStore2.runtime.id], "Handle Bounded dataStore should be in summary");
     });
 
@@ -267,7 +276,7 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
         assert.strictEqual(sparseMatrix.id, sparseMatrixId, "Sparse matrix should exist!!");
     });
 
-    it("Change contents of dds, then rehydrate and then check snapshot", async () => {
+    it("Change contents of dds, then rehydrate and then check summary", async () => {
         const { container } =
             await createDetachedContainerAndGetRootDataStore();
 
@@ -283,11 +292,13 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
         const responseAfter = await container2.request({ url: "/" });
         const defaultComponentAfter = responseAfter.value as TestFluidObject;
         const sharedStringAfter = await defaultComponentAfter.getSharedObject<SharedString>(sharedStringId);
-        assert.strictEqual(JSON.stringify(sharedStringAfter.snapshot()), JSON.stringify(sharedStringBefore.snapshot()),
-            "Snapshot of shared string should match and contents should be same!!");
+        assert.strictEqual(
+            JSON.stringify(sharedStringAfter.summarize()),
+            JSON.stringify(sharedStringBefore.summarize()),
+            "Summaries of shared string should match and contents should be same!!");
     });
 
-    it("Rehydrate container from snapshot, change contents of dds and then check snapshot", async () => {
+    it("Rehydrate container from summary, change contents of dds and then check summary", async () => {
         const { container } =
             await createDetachedContainerAndGetRootDataStore();
         let str = "AA";
@@ -311,10 +322,14 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
         const defaultComponentAfter = responseAfter.value as TestFluidObject;
         const sharedStringAfter = await defaultComponentAfter.getSharedObject<SharedString>(sharedStringId);
         const sharedMapAfter = await defaultComponentAfter.getSharedObject<SharedMap>(sharedMapId);
-        assert.strictEqual(JSON.stringify(sharedStringAfter.snapshot()), JSON.stringify(sharedStringBefore.snapshot()),
-            "Snapshot of shared string should match and contents should be same!!");
-        assert.strictEqual(JSON.stringify(sharedMapAfter.snapshot()), JSON.stringify(sharedMapBefore.snapshot()),
-            "Snapshot of shared map should match and contents should be same!!");
+        assert.strictEqual(
+            JSON.stringify(sharedStringAfter.summarize()),
+            JSON.stringify(sharedStringBefore.summarize()),
+            "Summaries of shared string should match and contents should be same!!");
+        assert.strictEqual(
+            JSON.stringify(sharedMapAfter.summarize()),
+            JSON.stringify(sharedMapBefore.summarize()),
+            "Summaries of shared map should match and contents should be same!!");
     });
 
     it("Rehydrate container, don't load a data store and then load after container attachment. Make changes to " +
@@ -332,6 +347,7 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
         const snapshotTree = container.serialize();
 
         const rehydratedContainer = await loader.rehydrateDetachedContainerFromSnapshot(snapshotTree);
+        opProcessingController.addDeltaManagers(rehydratedContainer.deltaManager);
         await rehydratedContainer.attach(request);
 
         // Now load the container from another loader.
@@ -340,6 +356,7 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
         assert(rehydratedContainer.resolvedUrl);
         const requestUrl2 = await urlResolver2.getAbsoluteUrl(rehydratedContainer.resolvedUrl, "");
         const container2 = await loader2.resolve({ url: requestUrl2 });
+        opProcessingController.addDeltaManagers(rehydratedContainer.deltaManager);
 
         // Get the sharedString1 from dataStore2 in rehydrated container.
         const responseBefore = await rehydratedContainer.request({ url: `/${dataStore2.context.id}` });
@@ -351,13 +368,12 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
         const dataStore3 = responseAfter.value as TestFluidObject;
         const sharedMap3 = await dataStore3.getSharedObject<SharedMap>(sharedMapId);
 
-        const opProcessingController = new OpProcessingController(testDeltaConnectionServer);
-        opProcessingController.addDeltaManagers(dataStore3.runtime.deltaManager, dataStore2FromRC.runtime.deltaManager);
-
         await opProcessingController.process();
         assert.strictEqual(sharedMap3.get("1"), "B", "Contents should be as required");
-        assert.strictEqual(JSON.stringify(sharedMap3.snapshot()), JSON.stringify(sharedMapFromRC.snapshot()),
-            "Snapshot of shared string should match and contents should be same!!");
+        assert.strictEqual(
+            JSON.stringify(sharedMap3.summarize()),
+            JSON.stringify(sharedMapFromRC.summarize()),
+            "Summaries of shared string should match and contents should be same!!");
     });
 
     it("Rehydrate container, create but don't load a data store. Attach rehydrated container and load " +
@@ -376,6 +392,7 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
         const snapshotTree = container.serialize();
 
         const rehydratedContainer = await loader.rehydrateDetachedContainerFromSnapshot(snapshotTree);
+        opProcessingController.addDeltaManagers(rehydratedContainer.deltaManager);
         await rehydratedContainer.attach(request);
 
         // Now load the container from another loader.
@@ -384,6 +401,7 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
         assert(rehydratedContainer.resolvedUrl);
         const requestUrl2 = await urlResolver2.getAbsoluteUrl(rehydratedContainer.resolvedUrl, "");
         const container2 = await loader2.resolve({ url: requestUrl2 });
+        opProcessingController.addDeltaManagers(container2.deltaManager);
 
         // Get the sharedString1 from dataStore2 in container2.
         const responseBefore = await container2.request({ url: `/${dataStore2.context.id}` });
@@ -396,13 +414,12 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
         const dataStore2FromRC = responseAfter.value as TestFluidObject;
         const sharedMapFromRC = await dataStore2FromRC.getSharedObject<SharedMap>(sharedMapId);
 
-        const opProcessingController = new OpProcessingController(testDeltaConnectionServer);
-        opProcessingController.addDeltaManagers(dataStore3.runtime.deltaManager, dataStore2FromRC.runtime.deltaManager);
-
         await opProcessingController.process();
         assert.strictEqual(sharedMapFromRC.get("1"), "B", "Changes should be reflected in other map");
-        assert.strictEqual(JSON.stringify(sharedMap3.snapshot()), JSON.stringify(sharedMapFromRC.snapshot()),
-            "Snapshot of shared string should match and contents should be same!!");
+        assert.strictEqual(
+            JSON.stringify(sharedMap3.summarize()),
+            JSON.stringify(sharedMapFromRC.summarize()),
+            "Summaries of shared string should match and contents should be same!!");
     });
 
     it("Container rehydration with not bounded dataStore handle stored in root of other bounded dataStore",
@@ -468,7 +485,8 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
         const snapshotTree = container.serialize();
         const rehydratedContainer = await loader.rehydrateDetachedContainerFromSnapshot(snapshotTree);
 
-        const responseForDDS = await rehydratedContainer.request({ url: `/${defaultDataStore.runtime.id}/${ddsId}` });
+        const responseForDDS =
+            await rehydratedContainer.request({ url: `/${defaultDataStore.runtime.id}/${ddsId}` });
         const ddd2FromRC = responseForDDS.value as SharedString;
         assert(ddd2FromRC, "ddd2 should have been serialized properly");
         assert.strictEqual(ddd2FromRC.id, ddsId, "DDS id should match");
@@ -523,8 +541,13 @@ describe(`Dehydrate Rehydrate Container Test`, () => {
 
         const snapshotTree = JSON.parse(container.serialize());
 
-        assert.strictEqual(Object.keys(snapshotTree.trees).length, 3,
-            "3 trees should be there(protocol, default dataStore, scheduler). Not bounded/Unreferenced " +
-                "data store should not get serialized");
+        assert.ok(snapshotTree.trees[".protocol"], "protocol tree not present");
+        assert.ok(snapshotTree.trees.default, "default dataStore tree not present");
+        assert.ok(snapshotTree.trees._scheduler, "scheduler tree not present");
+        assert.ok(
+            // eslint-disable-next-line unicorn/no-unsafe-regex
+            !Object.keys(snapshotTree.trees).some((key) => /^(?:\w+-){4}\w+$/.test(key)),
+            "unbounded/unreferenced data store tree present",
+        );
     });
 });

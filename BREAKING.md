@@ -1,19 +1,99 @@
+## 0.33 Breaking changes
+- [Normalizing enum ContainerErrorType](#normalizing-enum-containererrortype)
+- [Map and Directory typing changes from enabling strictNullCheck](#map-and-directory-typing-changes-from-enabling-strictNullCheck)
+- [MergeTree's ReferencePosition.getTileLabels and ReferencePosition.getRangeLabels() return undefined if it doesn't exist](#mergetree-referenceposition-gettilelabels-getrangelabels-changes)
+
+## Normalizing enum ContainerErrorType
+In an effort to clarify error categorization, a name and value in this enumeration were changed.
+
+## Map and Directory typing changes from enabling strictNullCheck
+Typescript compile options `strictNullCheck` is enabled for the `@fluidframework/map` package. Some of the API signature is updated to include possibility of `undefined` and `null`, which can cause new typescript compile error when upgrading.  Existing code may need to update to handle the possiblity of `undefined` or `null.
+
+## MergeTree ReferencePosition getTileLabels getRangeLabels changes
+This includes LocalReference and Marker.  getTileLabels and getRangeLabels methods will return undefined instead of creating an empty if the properties for tile labels and range labels is not set.
+
+## 0.32 Breaking changes
+- [Node version 12.17 required](#Node-version-update)
+- [getAttachSnapshot removed IFluidDataStoreChannel](#getAttachSnapshot-removed-from-IFluidDataStoreChannel)
+- [resolveDataStore replaced](#resolveDataStore-replaced)
+
+### Node version updated to 12.17
+Due to changes in server packages and introduction of AsyncLocalStorage module which requires Node version 12.17 or above, you will need to update Node version to 12.17 or above.
+
+### getAttachSnapshot removed from IFluidDataStoreChannel
+`getAttachSnapshot()` has been removed from `IFluidDataStoreChannel`. It is replaced by `getAttachSummary()`.
+
+### resolveDataStore replaced
+The resolveDataStore method manually exported by the ODSP resolver has been replaced with checkUrl() from the same package.
+
+## 0.30 Breaking Changes
+
+- [Branching removed](#Branching-removed)
+- [removeAllEntriesForDocId api name and signature change](#removeAllEntriesForDocId-api-name-and-signature-change)
+- [snapshot removed from IChannel and ISharedObject](#snapshot-removed-from-IChannel-and-ISharedObject)
+
+### Branching removed
+The branching feature has been removed. This includes all related members, methods, etc. such as `parentBranch`, `branchId`, `branch()`, etc.
+
+### removeAllEntriesForDocId api name and signature change
+`removeAllEntriesForDocId` api renamed to `removeEntries`. Now it takes `IFileEntry` as argument instead of just docId.
+
+### snapshot removed from IChannel and ISharedObject
+`snapshot` has been removed from `IChannel` and `ISharedObject`. It is replaced by `summarize` which should be used to get a summary of the channel / shared object.
+
+## 0.29 Breaking Changes
+
+- [OdspDriverUrlResolver2 renamed to OdspDriverUrlResolverForShareLink](#OdspDriverUrlResolver2-renamed-to-OdspDriverUrlResolverForShareLink)
+- [removeAllEntriesForDocId api in host storage changed](#removeAllEntriesForDocId-api-in-host-storage-changed)
+- [IContainerRuntimeBase.IProvideFluidDataStoreRegistry](#IContainerRuntimeBase.IProvideFluidDataStoreRegistry)
+- [_createDataStoreWithProps returns IFluidRouter](#_createDataStoreWithProps-returns-IFluidRouter)
+- [FluidDataStoreRuntime.registerRequestHandler deprecated](#FluidDataStoreRuntime.registerRequestHandler-deprecated)
+- [snapshot removed from IFluidDataStoreRuntime](#snapshot-removed-from-IFluidDataStoreRuntime)
+- [getAttachSnapshot deprecated in IFluidDataStoreChannel](#getAttachSnapshot-deprecated-in-IFluidDataStoreChannel)
+
+### OdspDriverUrlResolver2 renamed to OdspDriverUrlResolverForShareLink
+`OdspDriverUrlResolver2` renamed to `OdspDriverUrlResolverForShareLink`
+
+### removeAllEntriesForDocId api in host storage changed
+`removeAllEntriesForDocId` api in host storage is now an async api.
+
+### IContainerRuntimeBase.IProvideFluidDataStoreRegistry
+`IProvideFluidDataStoreRegistry` implementation moved from IContainerRuntimeBase to IContainerRuntime. Data stores and objects should not have access to global state in container.
+`IProvideFluidDataStoreRegistry` is removed from IFluidDataStoreChannel - it has not been implemented there for a while (it moved to context).
+
+### _createDataStoreWithProps returns IFluidRouter
+`IContainerRuntimeBase._createDataStoreWithProps` returns IFluidRouter instead of IFluidDataStoreChannel. This is done to be consistent with other APIs create data stores, and ensure we do not return internal interfaces. This likely to expose areas where IFluidDataStoreChannel.bindToContext() was called manually on data store. Such usage should be re-evaluate - lifetime management should be left up to runtime, storage of any handle form data store in attached DDS will result in automatic attachment of data store (and all of its objects) to container. If absolutely needed, and only for staging, casting can be done to implement old behavior.
+
+### FluidDataStoreRuntime.registerRequestHandler deprecated
+Please use mixinRequestHandler() as a way to create custom data store runtime  factory/object and append request handling to existing implementation.
+
+### snapshot removed from IFluidDataStoreRuntime
+`snapshot` has been removed from `IFluidDataStoreRuntime`.
+
+### getAttachSnapshot deprecated in IFluidDataStoreChannel
+`getAttachSnapshot()` has been deprecated in `IFluidDataStoreChannel`. It is replaced by `getAttachSummary()`.
+
 ## 0.28 Breaking Changes
 
+- [FileName should contain extension for ODSP driver create new path](#FileName-should-contain-extension-for-ODSP-driver-create-new-path)
+- [ODSP Driver IPersistedCache changes](#ODSP-Driver-IPersistedCache-Changes)
 - [IFluidPackage Changes](#IFluidPackage-Changes)
 - [DataObject changes](#DataObject-changes)
 - [RequestParser](#RequestParser)
 - [IFluidLodable.url is removed](#IFluidLodable.url-is-removed)
 - [Loader Constructor Changes](#Loader-Constructor-Changes)
 - [Moving DriverHeader and merge with CreateNewHeader](#moving-driverheader-and-merge-with-createnewheader)
+- [ODSP status codes moved from odsp-driver to odsp-doclib-utils](#ODSP-status-codes-moved-modules-from-odsp-driver-to-odsp-doclib-utils)
 
-### Moving DriverHeader and merge with CreateNewHeader
-Compile time only API breaking change between runtime and driver.  Only impacts driver implementer.
-No back-compat or mix version impact.
+### FileName should contain extension for ODSP driver create new path
+Now the ODSP driver expects file extension in the file name while creating a new detached container.
 
-DriverHeader is a driver concept, so move from core-interface to driver-definitions. CreateNewHeader is also a kind of driver header, merged it into DriverHeader.
+### ODSP Driver IPersistedCache-Changes
+Added api `removeAllEntriesForDocId` which allows removal of all entries for a given document id. Also the schema for entries stored inside odsp `IPersistedCache` has changed.
+It now stores/expect values as `IPersistedCacheValueWithEpoch`. So host needs to clear its cached entries in this version.
 
 ### IFluidPackage Changes
+- Moving IFluidPackage and IFluidCodeDetails from "@fluidframework/container-definitions" to '@fluidframework/core-interfaces'
 - Remove npm specific IPackage interface
 - Simplify the IFluidPackage by removing browser and npm specific properties
 - Add new interface IFluidBrowserPackage, and isFluidBrowserPackage which defines browser specific properties
@@ -67,6 +147,14 @@ After:
 
 if for some reason this change causes you problems, we've added a deprecated `Loader._create` method that has the same parameters as the previous constructor which can be used in the interim.
 
+### Moving DriverHeader and merge with CreateNewHeader
+Compile time only API breaking change between runtime and driver.  Only impacts driver implementer.
+No back-compat or mix version impact.
+
+DriverHeader is a driver concept, so move from core-interface to driver-definitions. CreateNewHeader is also a kind of driver header, merged it into DriverHeader.
+
+### ODSP status codes moved modules from odsp-driver to odsp-doclib-utils
+Error/status codes like `offlineFetchFailureStatusCode` which used to be imported like `import { offlineFetchFailureStatusCode } from '@fluidframework/@odsp-driver';` have been moved to `odspErrorUtils.ts` in `odsp-doclib-utils`.
 
 ## 0.27 Breaking Changes
 - [Local Web Host Removed](#Local-Web-Host-Removed)
@@ -138,9 +226,9 @@ You can use handleFromLegacyUri() for creating handles from container-internal U
 
 ### Package Renames
 As a follow up to the changes in 0.24 we are updating a number of package names
-- `@fluidframework/core-interfaces` is renamed to `@fluidframework/core-interfaces`
-- `@fluidframework/datastore-definitions` is renamed to `@fluidframework/datastore-definitions`
-- `@fluidframework/datastore` is renamed to `@fluidframework/datastore`
+- `@fluidframework/component-core-interfaces` is renamed to `@fluidframework/core-interfaces`
+- `@fluidframework/component-runtime-definitions` is renamed to `@fluidframework/datastore-definitions`
+- `@fluidframework/component-runtime` is renamed to `@fluidframework/datastore`
 - `@fluidframework/webpack-component-loader` is renamed to `@fluidframework/webpack-fluid-loader`
 
 ### IComponent and IComponent Interfaces Removed

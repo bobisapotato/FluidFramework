@@ -9,6 +9,7 @@ import {
     fetchIncorrectResponse,
     offlineFetchFailureStatusCode,
     fetchFailureStatusCode,
+    fetchTimeoutStatusCode,
 } from "@fluidframework/odsp-doclib-utils";
 import {
     default as fetch,
@@ -74,7 +75,7 @@ export async function fetchHelper(
         }
         if (!response.ok || response.status < 200 || response.status >= 300) {
             throwOdspNetworkError(
-                `Error ${response.status} from the server`, response.status, response);
+                `Error ${response.status}`, response.status, response);
         }
         return response;
     }, (error) => {
@@ -84,6 +85,9 @@ export async function fetchHelper(
         let online = isOnline();
         if (`${error}` === "TypeError: Failed to fetch") {
             online = OnlineStatus.Offline;
+        }
+        if (error.name === "AbortError") {
+            throwOdspNetworkError("Timeout during fetch", fetchTimeoutStatusCode);
         }
         throwOdspNetworkError(
             `Fetch error: ${error}`,
@@ -98,7 +102,7 @@ export async function fetchHelper(
  * @param requestInfo - fetch requestInfo, can be a string
  * @param requestInit - fetch requestInit
  */
-export async function fetchAndParseHelper<T>(
+export async function fetchAndParseAsJSONHelper<T>(
     requestInfo: RequestInfo,
     requestInit: RequestInit | undefined,
 ): Promise<IOdspResponse<T>> {

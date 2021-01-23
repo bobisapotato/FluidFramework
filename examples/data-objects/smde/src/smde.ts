@@ -3,8 +3,9 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
 import { EventEmitter } from "events";
+import { defaultFluidObjectRequestHandler } from "@fluidframework/aqueduct";
+import { assert } from "@fluidframework/common-utils";
 import {
     IFluidObject,
     IFluidLoadable,
@@ -13,7 +14,7 @@ import {
     IResponse,
     IFluidHandle,
 } from "@fluidframework/core-interfaces";
-import { FluidDataStoreRuntime, FluidObjectHandle } from "@fluidframework/datastore";
+import { FluidObjectHandle, mixinRequestHandler } from "@fluidframework/datastore";
 import { ISharedMap, SharedMap } from "@fluidframework/map";
 import {
     MergeTreeDeltaType,
@@ -58,7 +59,7 @@ export class Smde extends EventEmitter implements
     private smde: SimpleMDE | undefined;
 
     private get text() {
-        assert(this._text);
+        assert(!!this._text);
         return this._text;
     }
     constructor(private readonly runtime: IFluidDataStoreRuntime, private readonly context: IFluidDataStoreContext) {
@@ -68,11 +69,7 @@ export class Smde extends EventEmitter implements
     }
 
     public async request(request: IRequest): Promise<IResponse> {
-        return {
-            mimeType: "fluid/object",
-            status: 200,
-            value: this,
-        };
+        return defaultFluidObjectRequestHandler(this, request);
     }
 
     private async initialize() {
@@ -91,7 +88,7 @@ export class Smde extends EventEmitter implements
         }
 
         this.root = await this.runtime.getChannel("root") as ISharedMap;
-        this._text = await this.root.get<IFluidHandle<SharedString>>("text").get();
+        this._text = await this.root.get<IFluidHandle<SharedString>>("text")?.get();
     }
 
     public render(elm: HTMLElement, options?: IFluidHTMLOptions): void {
@@ -223,16 +220,14 @@ class SmdeFactory implements IFluidDataStoreFactory {
         dataTypes.set(mapFactory.type, mapFactory);
         dataTypes.set(sequenceFactory.type, sequenceFactory);
 
-        const runtime = FluidDataStoreRuntime.load(
-            context,
-            dataTypes,
-        );
+        const runtimeClass = mixinRequestHandler(
+            async (request: IRequest) => {
+                const router = await routerP;
+                return router.request(request);
+            });
 
-        const progressCollectionP = Smde.load(runtime, context);
-        runtime.registerRequestHandler(async (request: IRequest) => {
-            const progressCollection = await progressCollectionP;
-            return progressCollection.request(request);
-        });
+        const runtime = new runtimeClass(context, dataTypes);
+        const routerP = Smde.load(runtime, context);
 
         return runtime;
     }

@@ -8,17 +8,19 @@ import { IFluidHandle } from "@fluidframework/core-interfaces";
 import { SharedMap } from "@fluidframework/map";
 import { requestFluidObject } from "@fluidframework/runtime-utils";
 import {
-    OpProcessingController,
     TestFluidObject,
 } from "@fluidframework/test-utils";
 import {
-    generateTestWithCompat,
-    ICompatLocalTestObjectProvider,
+    generateTest,
+    ITestObjectProvider,
     TestDataObject,
 } from "./compatUtils";
 
-const tests = (args: ICompatLocalTestObjectProvider) => {
-    let opProcessingController: OpProcessingController;
+const tests = (argsFactory: () => ITestObjectProvider) => {
+    let args: ITestObjectProvider;
+    beforeEach(()=>{
+        args = argsFactory();
+    });
     let firstContainerObject1: TestDataObject;
     let firstContainerObject2: TestDataObject;
     let secondContainerObject1: TestDataObject;
@@ -35,11 +37,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         const secondContainer = await args.loadTestContainer();
         secondContainerObject1 = await requestFluidObject<TestDataObject>(secondContainer, "default");
 
-        opProcessingController = new OpProcessingController(args.deltaConnectionServer);
-        opProcessingController.addDeltaManagers(
-            firstContainerObject1._runtime.deltaManager, secondContainerObject1._runtime.deltaManager);
-
-        await opProcessingController.process();
+        await args.opProcessingController.process();
     });
 
     it("should generate the absolute path for ContainerRuntime correctly", () => {
@@ -93,10 +91,11 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         // Add the handle to the root DDS of `firstContainerObject1`.
         firstContainerObject1._root.set("sharedMap", sharedMapHandle);
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         // Get the handle in the remote client.
         const remoteSharedMapHandle = secondContainerObject1._root.get<IFluidHandle<SharedMap>>("sharedMap");
+        assert(remoteSharedMapHandle);
 
         // Verify that the remote client's handle has the correct absolute path.
         assert.equal(remoteSharedMapHandle.absolutePath, absolutePath, "The remote handle's path is incorrect");
@@ -123,10 +122,11 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         // Add the handle to the root DDS of `firstContainerObject1` so that the FluidDataObjectRuntime is different.
         firstContainerObject1._root.set("sharedMap", sharedMap.handle);
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         // Get the handle in the remote client.
         const remoteSharedMapHandle = secondContainerObject1._root.get<IFluidHandle<SharedMap>>("sharedMap");
+        assert(remoteSharedMapHandle);
 
         // Verify that the remote client's handle has the correct absolute path.
         assert.equal(remoteSharedMapHandle.absolutePath, absolutePath, "The remote handle's path is incorrect");
@@ -150,11 +150,12 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         // FluidDataObjectRuntime is different.
         firstContainerObject1._root.set("dataObject2", firstContainerObject2.handle);
 
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         // Get the handle in the remote client.
         const remoteDataObjectHandle =
             secondContainerObject1._root.get<IFluidHandle<TestFluidObject>>("dataObject2");
+        assert(remoteDataObjectHandle);
 
         // Verify that the remote client's handle has the correct absolute path.
         assert.equal(remoteDataObjectHandle.absolutePath, absolutePath, "The remote handle's path is incorrect");
@@ -170,5 +171,5 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
 };
 
 describe("FluidObjectHandle", () => {
-    generateTestWithCompat(tests);
+    generateTest(tests, { tinylicious: true });
 });

@@ -3,29 +3,32 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
 // eslint-disable-next-line import/no-internal-modules
 import merge from "lodash/merge";
-import uuid from "uuid";
+import { v4 as uuid } from "uuid";
 import {
     ITelemetryLogger,
 } from "@fluidframework/common-definitions";
-import { performance } from "@fluidframework/common-utils";
-import {  IRequest, IResponse, IFluidRouter } from "@fluidframework/core-interfaces";
+import { assert, performance } from "@fluidframework/common-utils";
+import {
+    IRequest,
+    IResponse,
+    IFluidRouter,
+    IFluidCodeDetails,
+    isFluidCodeDetails,
+} from "@fluidframework/core-interfaces";
 import {
     IAudience,
     IConnectionDetails,
     IContainer,
     IContainerEvents,
     IDeltaManager,
-    IFluidCodeDetails,
     LoaderHeader,
     IRuntimeState,
     ICriticalContainerError,
     ContainerWarning,
-    IThrottlingWarning,
     AttachState,
-    isFluidCodeDetails,
+    IThrottlingWarning,
 } from "@fluidframework/container-definitions";
 import { CreateContainerError, GenericError } from "@fluidframework/container-utils";
 import {
@@ -37,13 +40,13 @@ import {
 } from "@fluidframework/driver-definitions";
 import {
     BlobCacheStorageService,
-    buildSnapshotTree,
     readAndParse,
     OnlineStatus,
     isOnline,
     ensureFluidResolvedUrl,
     combineAppAndProtocolSummary,
     readAndParseFromBlobs,
+    buildSnapshotTree,
 } from "@fluidframework/driver-utils";
 import {
     isSystemMessage,
@@ -53,6 +56,7 @@ import {
 import {
     FileMode,
     IClient,
+    IClientConfiguration,
     IClientDetails,
     ICommittedProposal,
     IDocumentAttributes,
@@ -62,7 +66,6 @@ import {
     ISequencedClient,
     ISequencedDocumentMessage,
     ISequencedProposal,
-    IServiceConfiguration,
     ISignalClient,
     ISignalMessage,
     ISnapshotTree,
@@ -72,6 +75,8 @@ import {
     MessageType,
     TreeEntry,
     ISummaryTree,
+    IPendingProposal,
+    SummaryType,
 } from "@fluidframework/protocol-definitions";
 import {
     ChildLogger,
@@ -87,7 +92,6 @@ import { IConnectionArgs, DeltaManager, ReconnectMode } from "./deltaManager";
 import { DeltaManagerProxy } from "./deltaManagerProxy";
 import { Loader, RelativeLoader } from "./loader";
 import { pkgVersion } from "./packageVersion";
-import { PrefetchDocumentStorageService } from "./prefetchDocumentStorageService";
 import { parseUrl, convertProtocolAndAppSummaryToSnapshotTree } from "./utils";
 
 const detachedContainerRefSeqNumber = 0;
@@ -284,7 +288,6 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
     private readonly _deltaManager: DeltaManager;
     private _existing: boolean | undefined;
     private service: IDocumentService | undefined;
-    private _parentBranch: string | null = null;
     private _connectionState = ConnectionState.Disconnected;
     private readonly _audience: Audience;
 
@@ -341,6 +344,9 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
         return this._deltaManager.readonlyPermissions;
     }
 
+    /**
+     * {@inheritDoc DeltaManager.forceReadonly}
+     */
     public forceReadonly(readonly: boolean) {
         this._deltaManager.forceReadonly(readonly);
     }
@@ -369,7 +375,7 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
      * Service configuration details. If running in offline mode will be undefined otherwise will contain service
      * configuration details returned as part of the initial connection.
      */
-    public get serviceConfiguration(): IServiceConfiguration | undefined {
+    public get serviceConfiguration(): IClientConfiguration | undefined {
         return this._deltaManager.serviceConfiguration;
     }
 
@@ -393,8 +399,15 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
         return this._deltaManager.clientDetails;
     }
 
+    /**
+     * @deprecated use codeDetails
+     */
     public get chaincodePackage(): IFluidCodeDetails | undefined {
-        return this._context?.codeDetails;
+        return this.codeDetails;
+    }
+
+    public get codeDetails(): IFluidCodeDetails | undefined {
+        return this._context?.codeDetails ?? this.getCodeDetailsFromQuorum();
     }
 
     /**
@@ -411,15 +424,8 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
         return this._audience;
     }
 
-    /**
-     * Returns the parent branch for this document
-     */
-    public get parentBranch(): string | null {
-        return this._parentBranch;
-    }
     private get serviceFactory() {return this.loader.services.documentServiceFactory;}
     private get urlResolver() {return this.loader.services.urlResolver;}
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
     public get options() { return this.loader.services.options;}
     private get scope() { return this.loader.services.scope;}
     private get codeLoader() { return this.loader.services.codeLoader;}
@@ -497,7 +503,7 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
 
         this._context?.dispose(error !== undefined ? new Error(error.message) : undefined);
 
-        assert.strictEqual(this.connectionState, ConnectionState.Disconnected, "disconnect event was not raised!");
+        assert(this.connectionState === ConnectionState.Disconnected, "disconnect event was not raised!");
 
         if (error !== undefined) {
             // Log current sequence number - useful if we have access to a file to understand better
@@ -526,10 +532,10 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
     }
 
     public serialize(): string {
-        assert.strictEqual(this.attachState, AttachState.Detached, "Should only be called in detached container");
+        assert(this.attachState === AttachState.Detached, "Should only be called in detached container");
 
         const appSummary: ISummaryTree = this.context.createSummary();
-        const protocolSummary = this.protocolHandler.captureSummary();
+        const protocolSummary = this.captureProtocolSummary();
         const snapshotTree = convertProtocolAndAppSummaryToSnapshotTree(protocolSummary, appSummary);
         return JSON.stringify(snapshotTree);
     }
@@ -552,7 +558,7 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
 
         this.attachInProgress = true;
         try {
-            assert.strictEqual(this.deltaManager.inbound.length, 0, "Inbound queue should be empty when attaching");
+            assert(this.deltaManager.inbound.length === 0, "Inbound queue should be empty when attaching");
             // Only take a summary if the container is in detached state, otherwise we could have local changes.
             // In failed attach call, we would already have a summary cached.
             if (this._attachState === AttachState.Detached) {
@@ -567,7 +573,7 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
                 if (this.protocolHandler === undefined) {
                     throw new Error("Protocol Handler is undefined");
                 }
-                const protocolSummary = this.protocolHandler.captureSummary();
+                const protocolSummary = this.captureProtocolSummary();
                 this.cachedAttachSummary = combineAppAndProtocolSummary(appSummary, protocolSummary);
 
                 // Set the state as attaching as we are starting the process of attaching container.
@@ -579,7 +585,7 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
                     this.emit("attaching");
                 }
             }
-            assert(this.cachedAttachSummary,
+            assert(!!this.cachedAttachSummary,
                 "Summary should be there either by this attach call or previous attach call!!");
 
             if (request.headers?.[DriverHeader.createNew] === undefined) {
@@ -624,7 +630,6 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
             this._attachState = AttachState.Attached;
             this.emit("attached");
             this.cachedAttachSummary = undefined;
-            this._parentBranch = this._id;
 
             // Propagate current connection state through the system.
             this.propagateConnectionState();
@@ -641,14 +646,6 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
     }
 
     public async snapshot(tagMessage: string, fullTree: boolean = false): Promise<void> {
-        // TODO: Issue-2171 Support for Branch Snapshots
-        if (tagMessage.includes("ReplayTool Snapshot") === false && this.parentBranch !== null) {
-            // The below debug ruins the chrome debugging session
-            // Tracked (https://bugs.chromium.org/p/chromium/issues/detail?id=659515)
-            debug(`Skipping snapshot due to being branch of ${this.parentBranch}`);
-            return;
-        }
-
         // Only snapshot once a code quorum has been established
         if (!this.protocolHandler.quorum.has("code") && !this.protocolHandler.quorum.has("code2")) {
             this.logger.sendTelemetryEvent({ eventName: "SkipSnapshot" });
@@ -657,18 +654,13 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
 
         // Stop inbound message processing while we complete the snapshot
         try {
-            if (this.deltaManager !== undefined) {
-                await this.deltaManager.inbound.systemPause();
-            }
-
+            await this.deltaManager.inbound.pause();
             await this.snapshotCore(tagMessage, fullTree);
         } catch (ex) {
             this.logger.logException({ eventName: "SnapshotExceptionError" }, ex);
             throw ex;
         } finally {
-            if (this.deltaManager !== undefined) {
-                this.deltaManager.inbound.systemResume();
-            }
+            this.deltaManager.inbound.resume();
         }
     }
 
@@ -773,7 +765,8 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
         if (legacyResolver.getAbsoluteUrl !== undefined) {
             return this.urlResolver.getAbsoluteUrl(
                 this.resolvedUrl,
-                relativeUrl);
+                relativeUrl,
+                this._context?.codeDetails);
         }
 
         if (legacyResolver.requestUrl !== undefined) {
@@ -790,33 +783,76 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
         throw new Error("Url Resolver does not support creating urls");
     }
 
+    public async proposeCodeDetails(codeDetails: IFluidCodeDetails) {
+        if (!isFluidCodeDetails(codeDetails)) {
+            throw new Error("Provided codeDetails are not IFluidCodeDetails");
+        }
+
+        if (this.codeLoader.IFluidCodeDetailsComparer) {
+            const comparision = await this.codeLoader.IFluidCodeDetailsComparer.compare(
+                codeDetails,
+                this.getCodeDetailsFromQuorum());
+            if (comparision !== undefined && comparision <= 0) {
+                throw new Error("Proposed code details should be greater than the current");
+            }
+        }
+
+        return this.getQuorum().propose("code", codeDetails)
+            .then(()=>true)
+            .catch(()=>false);
+    }
+
     private async reloadContextCore(): Promise<void> {
-        await Promise.all([
-            this.deltaManager.inbound.systemPause(),
-            this.deltaManager.inboundSignal.systemPause()]);
-
-        const previousContextState = await this.context.snapshotRuntimeState();
-        this.context.dispose();
-
         const codeDetails = this.getCodeDetailsFromQuorum();
 
-        // don't fire this event if we are transitioning from a null runtime to a real runtime
+        await Promise.all([
+            this.deltaManager.inbound.pause(),
+            this.deltaManager.inboundSignal.pause()]);
+
+        if (await this.context.satisfies(codeDetails) === true) {
+            this.deltaManager.inbound.resume();
+            this.deltaManager.inboundSignal.resume();
+            return;
+        }
+
+        // By default, close the container and let the host reload.
+        // If hotSwapContext is true in the loader options, then try
+        // to reload the context without closing the container.
+        type ReloadState = { hotSwap: true; prevState: IRuntimeState } | { hotSwap: false };
+        let state: ReloadState = { hotSwap: false };
+        if (this.options.hotSwapContext === true) {
+            const prevState = await this.context.snapshotRuntimeState();
+            state = { hotSwap: true, prevState };
+        }
+        this.context.dispose(new Error("ContextDisposedForReload"));
+
+        // We always hot-swap, but we don't fire the contextDisposed event
+        // if we are transitioning from a null runtime to a real runtime
         // with detached container we no longer need the null runtime, but for legacy
         // reasons need to keep it around (old documents without summary before code proposal).
         // client's shouldn't need to care about this transition, as it is a implementation detail.
         // if we didn't do this check, the clients would need to do it themselves,
         // which would futher spread the usage of the hasNullRuntime property
         // making it harder to deprecate.
-        if (!this.hasNullRuntime()) {
+        if (this.hasNullRuntime()) {
+            if (!state.hotSwap) {
+                state = { hotSwap: true, prevState: {} };
+            }
+        } else {
             this.emit("contextDisposed", codeDetails, this.context?.codeDetails);
         }
+
         if (this.closed) {
+            return;
+        }
+        if (!state.hotSwap) {
+            this.close();
             return;
         }
         let snapshot: ISnapshotTree | undefined;
         const blobs = new Map();
-        if (previousContextState.snapshot !== undefined) {
-            snapshot = await buildSnapshotTree(previousContextState.snapshot.entries, blobs);
+        if (state.prevState.snapshot !== undefined) {
+            snapshot = buildSnapshotTree(state.prevState.snapshot.entries, blobs);
 
             /**
              * Should be removed / updated after issue #2914 is fixed.
@@ -834,7 +870,7 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
 
         if (blobs.size > 0) {
             this.blobsCacheStorageService =
-                new BlobCacheStorageService(this.storageService, Promise.resolve(blobs));
+                new BlobCacheStorageService(this.storageService, blobs);
         }
         const attributes: IDocumentAttributes = {
             branch: this.id,
@@ -843,10 +879,10 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
             term: this._deltaManager.referenceTerm,
         };
 
-        await this.loadContext(codeDetails, attributes, snapshot, previousContextState);
+        await this.loadContext(codeDetails, attributes, snapshot, state.prevState);
 
-        this.deltaManager.inbound.systemResume();
-        this.deltaManager.inboundSignal.systemResume();
+        this.deltaManager.inbound.resume();
+        this.deltaManager.inboundSignal.resume();
     }
 
     private async snapshotCore(tagMessage: string, fullTree: boolean = false) {
@@ -925,7 +961,6 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
         // Output the tree
         const root: ITree = {
             entries,
-            id: null,
         };
 
         return root;
@@ -992,10 +1027,9 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
         this._attachState = AttachState.Attached;
 
         // Fetch specified snapshot, but intentionally do not load from snapshot if specifiedVersion is null
-        const maybeSnapshotTree = specifiedVersion === null ? undefined
-            : await this.fetchSnapshotTree(specifiedVersion);
+        const { snapshot, versionId } = await this.fetchSnapshotTree(specifiedVersion);
 
-        const attributes = await this.getDocumentAttributes(this.storageService, maybeSnapshotTree);
+        const attributes = await this.getDocumentAttributes(this.storageService, snapshot);
 
         // Attach op handlers to start processing ops
         this.attachDeltaManagerOpHandler(attributes);
@@ -1003,15 +1037,14 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
         // ...load in the existing quorum
         // Initialize the protocol handler
         const protocolHandlerP =
-            this.loadAndInitializeProtocolState(attributes, this.storageService, maybeSnapshotTree);
+            this.loadAndInitializeProtocolState(attributes, this.storageService, snapshot);
 
         let loadDetailsP: Promise<void>;
 
         // Initialize document details - if loading a snapshot use that - otherwise we need to wait on
         // the initial details
-        if (maybeSnapshotTree !== undefined) {
+        if (snapshot !== undefined) {
             this._existing = true;
-            this._parentBranch = attributes.branch !== this.id ? attributes.branch : null;
             loadDetailsP = Promise.resolve();
         } else {
             if (startConnectionP === undefined) {
@@ -1020,7 +1053,6 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
             // Intentionally don't .catch on this promise - we'll let any error throw below in the await.
             loadDetailsP = startConnectionP.then((details) => {
                 this._existing = details.existing;
-                this._parentBranch = details.parentBranch;
             });
         }
 
@@ -1029,7 +1061,7 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
         [this._protocolHandler] = await Promise.all([protocolHandlerP, loadDetailsP]);
 
         const codeDetails = this.getCodeDetailsFromQuorum();
-        await this.loadContext(codeDetails, attributes, maybeSnapshotTree);
+        await this.loadContext(codeDetails, attributes, snapshot);
 
         // Propagate current connection state through the system.
         this.propagateConnectionState();
@@ -1044,7 +1076,7 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
         return {
             existing: this._existing,
             sequenceNumber: attributes.sequenceNumber,
-            version: maybeSnapshotTree?.id ?? undefined,
+            version: versionId,
         };
     }
 
@@ -1097,7 +1129,7 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
 
     private async rehydrateDetachedFromSnapshot(snapshotTree: ISnapshotTree) {
         const attributes = await this.getDocumentAttributes(undefined, snapshotTree);
-        assert.strictEqual(attributes.sequenceNumber, 0, "Seq number in detached container should be 0!!");
+        assert(attributes.sequenceNumber === 0, "Seq number in detached container should be 0!!");
         this.attachDeltaManagerOpHandler(attributes);
 
         // We know this is create detached flow with snapshot.
@@ -1116,11 +1148,7 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
     }
 
     private async getDocumentStorageService(): Promise<IDocumentStorageService> {
-        if (this.service === undefined) {
-            throw new Error("Not attached");
-        }
-        const storageService = await this.service.connectToStorage();
-        return new PrefetchDocumentStorageService(storageService);
+        return this._deltaManager.connectToStorage();
     }
 
     private async getDocumentAttributes(
@@ -1195,7 +1223,6 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
         values: [string, any][],
     ): ProtocolOpHandler {
         const protocol = new ProtocolOpHandler(
-            attributes.branch,
             attributes.minimumSequenceNumber,
             attributes.sequenceNumber,
             attributes.term,
@@ -1225,19 +1252,66 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
             }
         });
 
+        protocol.quorum.on("addProposal",(proposal: IPendingProposal) => {
+            if (proposal.key === "code" || proposal.key === "code2") {
+                this.emit("codeDetailsProposed", proposal.value, proposal);
+            }
+        });
+
         protocol.quorum.on(
             "approveProposal",
             (sequenceNumber, key, value) => {
                 debug(`approved ${key}`);
                 if (key === "code" || key === "code2") {
-                    debug(`loadRuntimeFactory ${JSON.stringify(value)}`);
-
+                    debug(`codeProposal ${JSON.stringify(value)}`);
+                    if (!isFluidCodeDetails(value)) {
+                        this.logger.send({
+                                eventName: "CodeProposalNotIFluidCodeDetails",
+                                category: "warning",
+                        });
+                    }
                     // eslint-disable-next-line @typescript-eslint/no-floating-promises
                     this.reloadContext();
                 }
             });
 
         return protocol;
+    }
+
+    private captureProtocolSummary(): ISummaryTree {
+        const quorumSnapshot = this.protocolHandler.quorum.snapshot();
+
+        // Save attributes for the document
+        const documentAttributes: IDocumentAttributes = {
+            branch: this.id,
+            minimumSequenceNumber: this.protocolHandler.minimumSequenceNumber,
+            sequenceNumber: this.protocolHandler.sequenceNumber,
+            term: this.protocolHandler.term,
+        };
+
+        const summary: ISummaryTree = {
+            tree: {
+                attributes: {
+                    content: JSON.stringify(documentAttributes),
+                    type: SummaryType.Blob,
+                },
+                quorumMembers: {
+                    content: JSON.stringify(quorumSnapshot.members),
+                    type: SummaryType.Blob,
+                },
+                quorumProposals: {
+                    content: JSON.stringify(quorumSnapshot.proposals),
+                    type: SummaryType.Blob,
+                },
+                quorumValues: {
+                    content: JSON.stringify(quorumSnapshot.values),
+                    type: SummaryType.Blob,
+                },
+            },
+            type: SummaryType.Tree,
+        };
+
+        return summary;
     }
 
     private getCodeDetailsFromQuorum(): IFluidCodeDetails {
@@ -1248,13 +1322,6 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
         // Back compat
         if (pkg === undefined) {
             pkg = quorum.get("code2");
-        }
-
-        if (!isFluidCodeDetails(pkg)) {
-            this.logger.send({
-                    eventName: "CodeProposalNotIFluidCodeDetails",
-                    category: "warning",
-            });
         }
 
         return pkg as IFluidCodeDetails;
@@ -1578,20 +1645,27 @@ export class Container extends EventEmitterWithErrorHandling<IContainerEvents> i
     /**
      * Get the most recent snapshot, or a specific version.
      * @param specifiedVersion - The specific version of the snapshot to retrieve
-     * @returns The snapshot requested, or the latest snapshot if no version was specified
+     * @returns The snapshot requested, or the latest snapshot if no version was specified, plus version ID
      */
-    private async fetchSnapshotTree(specifiedVersion?: string): Promise<ISnapshotTree | undefined> {
+    private async fetchSnapshotTree(specifiedVersion: string | undefined | null):
+        Promise<{snapshot?: ISnapshotTree; versionId?: string}>
+    {
+        if (specifiedVersion === null) {
+            return {};
+        }
         const version = await this.getVersion(specifiedVersion ?? this.id);
 
-        if (version !== undefined) {
-            this._loadedFromVersion = version;
-            return await this.storageService.getSnapshotTree(version) ?? undefined;
-        } else if (specifiedVersion !== undefined) {
+        if (version === undefined && specifiedVersion !== undefined) {
             // We should have a defined version to load from if specified version requested
-            this.logger.sendErrorEvent({ eventName: "NoVersionFoundWhenSpecified", specifiedVersion });
+            this.logger.sendErrorEvent({ eventName: "NoVersionFoundWhenSpecified", id: specifiedVersion });
         }
+        this._loadedFromVersion = version;
+        const snapshot = await this.storageService.getSnapshotTree(version) ?? undefined;
 
-        return undefined;
+        if (snapshot === undefined && version !== undefined) {
+            this.logger.sendErrorEvent({ eventName: "getSnapshotTreeFailed", id: version.id });
+        }
+        return { snapshot, versionId: version?.id };
     }
 
     private async loadContext(

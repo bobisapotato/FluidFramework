@@ -2,7 +2,8 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License.
  */
-import { strict as assert } from "assert";
+
+ import { assert } from "@fluidframework/common-utils";
 import { Property } from "./base";
 import { RedBlackTree } from "./collections";
 import { UnassignedSequenceNumber } from "./constants";
@@ -91,9 +92,9 @@ export class PartialSequenceLengths {
         recur = false) {
         let combinedPartialLengths = new PartialSequenceLengths(collabWindow.minSeq);
         PartialSequenceLengths.fromLeaves(mergeTree, branchId, combinedPartialLengths, block, collabWindow);
-        let prevPartial: PartialSequenceLength;
+        let prevPartial: PartialSequenceLength | undefined;
 
-        function cloneOverlapRemoveClients(oldTree: RedBlackTree<number, IOverlapClient>) {
+        function cloneOverlapRemoveClients(oldTree: RedBlackTree<number, IOverlapClient> | undefined) {
             if (!oldTree) { return undefined; }
             const newTree = new RedBlackTree<number, IOverlapClient>(compareNumbers);
             oldTree.map((bProp: Property<number, IOverlapClient>) => {
@@ -104,14 +105,15 @@ export class PartialSequenceLengths {
         }
 
         function combineOverlapClients(a: PartialSequenceLength, b: PartialSequenceLength) {
-            if (a.overlapRemoveClients) {
+            const overlapRemoveClientsA = a.overlapRemoveClients;
+            if (overlapRemoveClientsA) {
                 if (b.overlapRemoveClients) {
                     b.overlapRemoveClients.map((bProp: Property<number, IOverlapClient>) => {
-                        const aProp = a.overlapRemoveClients.get(bProp.key);
+                        const aProp = overlapRemoveClientsA.get(bProp.key);
                         if (aProp) {
                             aProp.data.seglen += bProp.data.seglen;
                         } else {
-                            a.overlapRemoveClients.put(bProp.data.clientId, { ...bProp.data });
+                            overlapRemoveClientsA.put(bProp.data.clientId, { ...bProp.data });
                         }
                         return true;
                     });
@@ -250,7 +252,6 @@ export class PartialSequenceLengths {
                             PartialSequenceLengths.insertSegment(
                                 combinedPartialLengths,
                                 segment,
-                                true,
                                 removalInfo);
                         }
                     }
@@ -303,14 +304,13 @@ export class PartialSequenceLengths {
     private static insertSegment(
         combinedPartialLengths: PartialSequenceLengths,
         segment: ISegment,
-        removedSeq = false,
         removalInfo?: IRemovalInfo) {
         let seq = segment.seq;
         let segmentLen = segment.cachedLength;
         let clientId = segment.clientId;
-        let removeClientOverlap: number[];
+        let removeClientOverlap: number[] | undefined;
 
-        if (removedSeq) {
+        if (removalInfo) {
             seq = removalInfo.removedSeq;
             segmentLen = -segmentLen;
             clientId = removalInfo.removedClientId;
@@ -359,8 +359,8 @@ export class PartialSequenceLengths {
     }
 
     private static addSeq(partialLengths: PartialSequenceLength[], seq: number, seqSeglen: number, clientId?: number) {
-        let seqPartialLen: PartialSequenceLength;
-        let penultPartialLen: PartialSequenceLength;
+        let seqPartialLen: PartialSequenceLength | undefined;
+        let penultPartialLen: PartialSequenceLength | undefined;
         let leqIndex = latestLEQ(partialLengths, seq);
         if (leqIndex >= 0) {
             const pLen = partialLengths[leqIndex];
@@ -719,7 +719,7 @@ export class PartialSequenceLengths {
             }
 
             // If we have client view, we should have the flat view
-            assert(this.partialLengths);
+            assert(!!this.partialLengths);
             const flatCount = this.verifyPartialLengths(this.partialLengths, false);
 
             // The number of partial lengths on the client view and flat view should be the same

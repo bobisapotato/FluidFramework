@@ -13,6 +13,7 @@ import {
     IWebServer,
     IWebServerFactory,
     MongoManager,
+    IThrottler,
 } from "@fluidframework/server-services-core";
 import * as utils from "@fluidframework/server-services-utils";
 import { Provider } from "nconf";
@@ -32,6 +33,9 @@ export class AlfredRunner implements utils.IRunner {
         private readonly port: string | number,
         private readonly orderManager: IOrdererManager,
         private readonly tenantManager: ITenantManager,
+        private readonly restThrottler: IThrottler,
+        private readonly socketConnectThrottler: IThrottler,
+        private readonly socketSubmitOpThrottler: IThrottler,
         private readonly storage: IDocumentStorage,
         private readonly clientManager: IClientManager,
         private readonly appTenants: IAlfredTenant[],
@@ -48,6 +52,7 @@ export class AlfredRunner implements utils.IRunner {
         const alfred = app.create(
             this.config,
             this.tenantManager,
+            this.restThrottler,
             this.storage,
             this.appTenants,
             this.mongoManager,
@@ -59,6 +64,8 @@ export class AlfredRunner implements utils.IRunner {
         const httpServer = this.server.httpServer;
 
         const maxNumberOfClientsPerDocument = this.config.get("alfred:maxNumberOfClientsPerDocument");
+        const maxTokenLifetimeSec = this.config.get("auth:maxTokenLifetimeSec");
+        const isTokenExpiryEnabled = this.config.get("auth:enableTokenExpiration");
         // Register all the socket.io stuff
         configureWebSocketServices(
             this.server.webSocketServer,
@@ -68,7 +75,11 @@ export class AlfredRunner implements utils.IRunner {
             this.clientManager,
             createMetricClient(this.metricClientConfig),
             winston,
-            maxNumberOfClientsPerDocument);
+            maxNumberOfClientsPerDocument,
+            maxTokenLifetimeSec,
+            isTokenExpiryEnabled,
+            this.socketConnectThrottler,
+            this.socketSubmitOpThrottler);
 
         // Listen on provided port, on all network interfaces.
         httpServer.listen(this.port);

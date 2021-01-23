@@ -8,15 +8,12 @@ import {
     IFluidSerializer,
     ISerializedHandle,
 } from "@fluidframework/core-interfaces";
-import { IFluidDataStoreRuntime } from "@fluidframework/datastore-definitions";
 import {
-    ISharedObject,
     parseHandles,
     serializeHandles,
     SharedObject,
     ValueType,
 } from "@fluidframework/shared-object-base";
-import { CounterValueType } from "./counter";
 import {
     ISerializableValue,
     ISerializedValue,
@@ -63,13 +60,6 @@ export function makeSerializable(
 }
 
 /**
- * Supported value types.
- */
-export const valueTypes: readonly IValueType<any>[] = [
-    new CounterValueType(),
-];
-
-/**
  * Manages a contained plain value.  May also contain shared object handles.
  */
 export class PlainLocalValue implements ILocalValue {
@@ -101,39 +91,6 @@ export class PlainLocalValue implements ILocalValue {
         return {
             type: this.type,
             value,
-        };
-    }
-}
-
-/**
- * SharedLocalValue exists for supporting older documents and is now deprecated.
- * @deprecated
- */
-export class SharedLocalValue implements ILocalValue {
-    /**
-     * Create a new SharedLocalValue.
-     * @param value - The shared object to store
-     * @deprecated
-     */
-    constructor(public readonly value: ISharedObject) {
-    }
-
-    /**
-     * {@inheritDoc ILocalValue."type"}
-     * @deprecated
-     */
-    public get type(): string {
-        return ValueType[ValueType.Shared];
-    }
-
-    /**
-     * {@inheritDoc ILocalValue.makeSerialized}
-     * @deprecated
-     */
-    public makeSerialized(): ISerializedValue {
-        return {
-            type: this.type,
-            value: this.value.id,
         };
     }
 }
@@ -205,9 +162,9 @@ export class LocalValueMaker {
 
     /**
      * Create a new LocalValueMaker.
-     * @param runtime - The runtime this maker will be associated with
+     * @param serializer - The serializer to serialize / parse handles.
      */
-    constructor(private readonly runtime: IFluidDataStoreRuntime) {
+    constructor(private readonly serializer: IFluidSerializer) {
     }
 
     /**
@@ -222,34 +179,34 @@ export class LocalValueMaker {
     /**
      * Create a new local value from an incoming serialized value.
      * @param serializable - The serializable value to make local
+     */
+    public fromSerializable(serializable: ISerializableValue): ILocalValue {
+        // Migrate from old shared value to handles
+        if (serializable.type === ValueType[ValueType.Shared]) {
+            serializable.type = ValueType[ValueType.Plain];
+            const handle: ISerializedHandle = {
+                type: "__fluid_handle__",
+                url: serializable.value as string,
+            };
+            serializable.value = handle;
+        }
+
+        const translatedValue = parseHandles(serializable.value, this.serializer);
+
+        return new PlainLocalValue(translatedValue);
+    }
+
+    /**
+     * Create a new local value from an incoming serialized value for value type
+     * @param serializable - The serializable value to make local
      * @param emitter - The value op emitter, if the serializable is a value type
      */
-    public fromSerializable(serializable: ISerializableValue, emitter?: IValueOpEmitter): ILocalValue {
-        if (serializable.type === ValueType[ValueType.Plain] || serializable.type === ValueType[ValueType.Shared]) {
-            // Migrate from old shared value to handles
-            if (serializable.type === ValueType[ValueType.Shared]) {
-                serializable.type = ValueType[ValueType.Plain];
-                const handle: ISerializedHandle = {
-                    type: "__fluid_handle__",
-                    url: serializable.value as string,
-                };
-                serializable.value = handle;
-            }
+    public fromSerializableValueType(serializable: ISerializableValue, emitter: IValueOpEmitter): ILocalValue {
+        if (this.valueTypes.has(serializable.type)) {
+            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+            const valueType = this.valueTypes.get(serializable.type)!;
 
-            const translatedValue = parseHandles(
-                serializable.value,
-                this.runtime.IFluidSerializer);
-
-            return new PlainLocalValue(translatedValue);
-        } else if (this.valueTypes.has(serializable.type)) {
-            if (serializable.type === "counter") {
-                console.error("The Counter value type has been deprecated. Please use the SharedCounter DDS instead.");
-            }
-            const valueType = this.valueTypes.get(serializable.type);
-
-            serializable.value = parseHandles(
-                serializable.value,
-                this.runtime.IFluidSerializer);
+            serializable.value = parseHandles(serializable.value, this.serializer);
 
             const localValue = valueType.factory.load(emitter, serializable.value);
             return new ValueTypeLocalValue(localValue, valueType);
@@ -280,10 +237,9 @@ export class LocalValueMaker {
      * @alpha
      */
     public makeValueType(type: string, emitter: IValueOpEmitter, params: any): ILocalValue {
-        // params is the initialization information for the value type, e.g. initial count on a counter
-        // type is the value type Name to initialize, e.g. "counter"
         const valueType = this.loadValueType(params, type, emitter);
-        return new ValueTypeLocalValue(valueType, this.valueTypes.get(type));
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        return new ValueTypeLocalValue(valueType, this.valueTypes.get(type)!);
     }
 
     /**

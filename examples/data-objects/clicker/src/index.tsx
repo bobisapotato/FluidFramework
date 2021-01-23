@@ -12,9 +12,7 @@ import React from "react";
 import ReactDOM from "react-dom";
 import { ClickerAgent } from "./agent";
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-const pkg = require("../package.json");
-export const ClickerName = pkg.name as string;
+export const ClickerName = "Clicker";
 
 const counterKey = "counter";
 
@@ -36,7 +34,7 @@ export class Clicker extends DataObject implements IFluidHTMLView {
 
     protected async hasInitialized() {
         const counterHandle = this.root.get<IFluidHandle<SharedCounter>>(counterKey);
-        this._counter = await counterHandle.get();
+        this._counter = await counterHandle?.get();
         this.setupAgent();
     }
 

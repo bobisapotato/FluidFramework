@@ -4,6 +4,7 @@
  */
 
 import { fromBase64ToUtf8 } from "@fluidframework/common-utils";
+import { IFluidSerializer } from "@fluidframework/core-interfaces";
 import {
     FileMode,
     ISequencedDocumentMessage,
@@ -40,7 +41,34 @@ interface ICounterSnapshotFormat {
 const snapshotFileName = "header";
 
 /**
- * Implementation of a counter shared object
+ * A `SharedCounter` is a shared object which holds a number that can be incremented or decremented.
+ *
+ * @remarks
+ * ### Creation
+ *
+ * To create a `SharedCounter`, get the factory and call create with a runtime and string ID:
+ *
+ * ```typescript
+ * const factory = SharedCounter.getFactory();
+ * const counter = factory.create(this.runtime, id) as SharedCounter;
+ * ```
+ *
+ * ### Usage
+ *
+ * Once created, you can call `increment` to modify the value with either a positive or negative number:
+ *
+ * ```typescript
+ * counter.increment(10); // add 10 to the counter value
+ * counter.increment(-5); // subtract 5 from the counter value
+ * ```
+ *
+ * To observe changes to the value (including those from remote clients), register for the `"incremented"` event:
+ *
+ * ```typescript
+ * counter.on("incremented", (incrementAmount, newValue) => {
+ *     console.log(`The counter incremented by ${incrementAmount} and now has a value of ${newValue}`);
+ * });
+ * ```
  */
 export class SharedCounter extends SharedObject<ISharedCounterEvents> implements ISharedCounter {
     /**
@@ -101,7 +129,7 @@ export class SharedCounter extends SharedObject<ISharedCounterEvents> implements
      *
      * @returns the snapshot of the current state of the counter
      */
-    public snapshot(): ITree {
+    protected snapshotCore(serializer: IFluidSerializer): ITree {
         // Get a serializable form of data
         const content: ICounterSnapshotFormat = {
             value: this.value,
@@ -120,23 +148,15 @@ export class SharedCounter extends SharedObject<ISharedCounterEvents> implements
                     },
                 },
             ],
-            // eslint-disable-next-line no-null/no-null
-            id: null,
         };
 
         return tree;
     }
 
     /**
-     * Load counter from snapshot
-     *
-     * @param branchId - Not used
-     * @param storage - the storage to get the snapshot from
-     * @returns - promise that resolved when the load is completed
+     * {@inheritDoc @fluidframework/shared-object-base#SharedObject.loadCore}
      */
-    protected async loadCore(
-        branchId: string | undefined,
-        storage: IChannelStorageService): Promise<void> {
+    protected async loadCore(storage: IChannelStorageService): Promise<void> {
         const rawContent = await storage.read(snapshotFileName);
 
         const content = rawContent !== undefined

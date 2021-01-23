@@ -3,9 +3,10 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
+import { strict } from "assert";
 import child_process from "child_process";
 import fs from "fs";
+import { assert, Lazy } from "@fluidframework/common-utils";
 import * as API from "@fluid-internal/client-api";
 import { ITelemetryBaseEvent, ITelemetryBaseLogger } from "@fluidframework/common-definitions";
 import { IRequest } from "@fluidframework/core-interfaces";
@@ -28,7 +29,6 @@ import {
     ReplayFileDeltaConnection,
 } from "@fluidframework/file-driver";
 import {
-    IBlob,
     ISequencedDocumentMessage,
     ITree,
     TreeEntry,
@@ -38,6 +38,7 @@ import {
     FileSnapshotReader,
     IFileSnapshot,
 } from "@fluidframework/replay-driver";
+import { getNormalizedSnapshot } from "@fluidframework/tool-utils";
 
 // "worker_threads" does not resolve without --experimental-worker flag on command line
 let threads = { isMainThread: true };
@@ -52,10 +53,10 @@ function expandTreeForReadability(tree: ITree): ITree {
     for (const node of tree.entries) {
         const newNode = { ...node };
         if (node.type === TreeEntry.Tree) {
-            newNode.value = expandTreeForReadability(node.value as ITree);
+            newNode.value = expandTreeForReadability(node.value);
         }
         if (node.type === TreeEntry.Blob) {
-            const blob = node.value as IBlob;
+            const blob = node.value;
             try {
                 newNode.value = {
                     contents: JSON.parse(blob.contents) as string,
@@ -69,26 +70,43 @@ function expandTreeForReadability(tree: ITree): ITree {
 }
 
 /**
+ * Helper function that normalizes the snapshot trees in the given file snapshot.
+ * @returns the normalized file snapshot.
+ */
+function getNormalizedFileSnapshot(snapshot: IFileSnapshot): IFileSnapshot {
+    const normalizedSnapshot: IFileSnapshot = {
+        commits: {},
+        tree: getNormalizedSnapshot(snapshot.tree),
+    };
+    for (const commit of Object.keys(snapshot.commits)) {
+        normalizedSnapshot.commits[commit] = getNormalizedSnapshot(snapshot.commits[commit]);
+    }
+    return normalizedSnapshot;
+}
+
+/**
  * Helper class to container information about particular snapshot
  */
 class ContainerContent {
     public snapshot?: IFileSnapshot;
 
-    private snapshotSavedString?: string;
-    private snapshotExpandedString?: string;
+    private readonly _normalizedSnapshot: Lazy<IFileSnapshot>;
+    private readonly _snapshotAsString: Lazy<string>;
+    private readonly _snapshotExpanded: Lazy<string>;
 
     public constructor(public readonly op: number) {
-    }
+        this._normalizedSnapshot = new Lazy(() => {
+            assert(this.snapshot !== undefined, "snapshot should be set before retreiving it");
+            return getNormalizedFileSnapshot(this.snapshot);
+        });
 
-    get snapshotAsString(): string {
-        if (this.snapshotSavedString === undefined) {
-            this.snapshotSavedString = JSON.stringify(this.snapshot, undefined, 2);
-        }
-        return this.snapshotSavedString;
-    }
+        this._snapshotAsString = new Lazy(() => {
+            assert(this.snapshot !== undefined, "snapshot should be set before retreiving it");
+            return JSON.stringify(this.snapshot, undefined, 2);
+        });
 
-    get snapshotExpanded(): string {
-        if (this.snapshotExpandedString === undefined) {
+        this._snapshotExpanded = new Lazy(() => {
+            assert(this.snapshot !== undefined, "snapshot should be set before retreiving it as expanded string");
             const snapshotExpanded: IFileSnapshot = {
                 commits: {},
                 tree: expandTreeForReadability(this.snapshot.tree),
@@ -96,17 +114,24 @@ class ContainerContent {
             for (const commit of Object.keys(this.snapshot.commits)) {
                 snapshotExpanded.commits[commit] = expandTreeForReadability(this.snapshot.commits[commit]);
             }
-
-            this.snapshotExpandedString = JSON.stringify(snapshotExpanded, undefined, 2);
-        }
-        return this.snapshotExpandedString;
+            return JSON.stringify(snapshotExpanded, undefined, 2);
+        });
     }
-}
 
-function sameContent(content1: ContainerContent, content2: ContainerContent): boolean {
-    assert(content1.op === content2.op);
+    // Returns a normalized version of the file snapshot. This will be used when comparing snapshots.
+    get normalizedSnapshot(): IFileSnapshot {
+        return this._normalizedSnapshot.value;
+    }
 
-    return content1.snapshotAsString === content2.snapshotAsString;
+    // Returns the original snapshot as a string.
+    get snapshotAsString(): string {
+        return this._snapshotAsString.value;
+    }
+
+    // Returns an expanded string version of the original snapshot for readability.
+    get snapshotExpanded(): string {
+        return this._snapshotExpanded.value;
+    }
 }
 
 /**
@@ -142,7 +167,7 @@ class ContainerUrlResolver implements IUrlResolver {
 
     public async resolve(request: IRequest): Promise<IResolvedUrl> {
         if (!this.cache.has(request.url)) {
-            return Promise.reject(`ContainerUrlResolver can't resolve ${request}`);
+            return Promise.reject(new Error(`ContainerUrlResolver can't resolve ${request}`));
         }
         return this.cache.get(request.url);
     }
@@ -242,7 +267,7 @@ class Document {
             await new Promise((resolve) => {
                 this.resolveC = resolve;
             });
-            assert.equal(this.documentSeqNumber, this.currentOp);
+            assert(this.documentSeqNumber === this.currentOp);
         }
     }
 
@@ -309,6 +334,8 @@ class Document {
                 ["@ms/tablero/TableroView", Promise.resolve(chaincode)],
                 ["@ms/tablero/TableroDocument", Promise.resolve(chaincode)],
                 ["@fluid-example/table-document/TableDocument", Promise.resolve(chaincode)],
+                ["LastEditedComponent", Promise.resolve(chaincode)],
+                ["OfficeRootComponent", Promise.resolve(chaincode)],
             ]);
         const options = {};
 
@@ -428,10 +455,10 @@ export class ReplayTool {
 
     private async setup() {
         if (this.args.inDirName === undefined) {
-            return Promise.reject("Please provide --indir argument");
+            return Promise.reject(new Error("Please provide --indir argument"));
         }
         if (!fs.existsSync(this.args.inDirName)) {
-            return Promise.reject("File does not exist");
+            return Promise.reject(new Error("File does not exist"));
         }
 
         this.deltaStorageService = new FileDeltaStorageService(this.args.inDirName);
@@ -448,12 +475,12 @@ export class ReplayTool {
         if (this.args.version !== undefined) {
             console.log(`Starting from ${this.args.version}, seq# = ${this.mainDocument.currentOp}`);
             if (this.mainDocument.currentOp > this.args.to) {
-                return Promise.reject("--to argument is below snapshot starting op. Nothing to do!");
+                return Promise.reject(new Error("--to argument is below snapshot starting op. Nothing to do!"));
             }
         }
 
-        if (this.args.initalizeFromSnapshotsDir) {
-            for (const node of fs.readdirSync(this.args.initalizeFromSnapshotsDir, { withFileTypes: true })) {
+        if (this.args.initializeFromSnapshotsDir) {
+            for (const node of fs.readdirSync(this.args.initializeFromSnapshotsDir, { withFileTypes: true })) {
                 let storage;
                 if (node.isDirectory()) {
                     // Did we load it already as main doc?
@@ -461,15 +488,16 @@ export class ReplayTool {
                         continue;
                     }
 
-                    const file = `${this.args.initalizeFromSnapshotsDir}/${node.name}/tree.json`;
+                    const file = `${this.args.initializeFromSnapshotsDir}/${node.name}/tree.json`;
                     if (!fs.existsSync(file)) {
                         console.error(`${file} does not exist, skipping ${node.name} snapshot`);
                         continue;
                     }
-                    storage = new FluidFetchReaderFileSnapshotWriter(this.args.initalizeFromSnapshotsDir, node.name);
+                    storage = new FluidFetchReaderFileSnapshotWriter(this.args.initializeFromSnapshotsDir, node.name);
                 } else {
                     if (node.name.startsWith("snapshot_")) {
-                        const content = fs.readFileSync(`${this.args.initalizeFromSnapshotsDir}/${node.name}`, "utf-8");
+                        const content = fs.readFileSync(
+                            `${this.args.initializeFromSnapshotsDir}/${node.name}`, "utf-8");
                         const snapshot = JSON.parse(content) as IFileSnapshot;
                         storage = new FileSnapshotReader(snapshot);
                     } else {
@@ -590,12 +618,11 @@ export class ReplayTool {
 
         const content = this.mainDocument.extractContent();
 
-        // eslint-disable-next-line @typescript-eslint/unbound-method
         this.storage.onSnapshotHandler = (snapshot: IFileSnapshot) => {
             content.snapshot = snapshot;
             if (this.args.compare) {
-                this.compareSnapshots(
-                    content,
+                this.compareWithReferenceSnapshot(
+                    content.normalizedSnapshot,
                     `${dir}/${this.mainDocument.getFileName()}`);
             } else if (this.args.write) {
                 fs.mkdirSync(dir, { recursive: true });
@@ -740,7 +767,6 @@ export class ReplayTool {
         const name1 = this.mainDocument.getFileName();
         const name2 = document2.getFileName();
 
-        // eslint-disable-next-line @typescript-eslint/unbound-method
         document2.storage.onSnapshotHandler = (snapshot: IFileSnapshot) => {
             content2.snapshot = snapshot;
         };
@@ -755,19 +781,37 @@ export class ReplayTool {
             return false;
         }
 
-        if (!sameContent(content, content2)) {
-            // eslint-disable-next-line max-len
-            this.reportError(`\nOp ${op}: Discrepancy between ${name1} & ${name2}! Likely a bug in snapshot load-save sequence!`);
-            fs.mkdirSync(dir, { recursive: true });
+        // Check if the two snapshots match.
+        let failed = true;
+        let error: any;
+        if (content.op === content2.op) {
+            // Deep compare the normalized snapshots. If they do not match, catch the error and display it.
+            try {
+                strict.deepStrictEqual(content.normalizedSnapshot, content2.normalizedSnapshot);
+                failed = false;
+            } catch (e) {
+                error = e;
+            }
+        }
 
-            this.expandForReadabilityAndWriteOut(content, `${dir}/${name1}`);
-            this.expandForReadabilityAndWriteOut(content2, `${dir}/${name2}`);
+        if (failed) {
+            // eslint-disable-next-line max-len
+            this.reportError(`\nOp ${op}: Discrepancy between ${name1} & ${name2}! Likely a bug in snapshot load-save sequence!`, error);
+
+            // Write the failed snapshots under 'FailedSnapshot' sub-directory of the current directory. This will in
+            // debugging by looking into the complete snapshot.
+            const failedDir = `${dir}/FailedSnapshots`;
+            fs.mkdirSync(failedDir, { recursive: true });
+
+            this.expandForReadabilityAndWriteOut(content, `${failedDir}/${name1}`);
+            this.expandForReadabilityAndWriteOut(content2, `${failedDir}/${name2}`);
 
             if (this.args.windiff) {
-                console.log(`windiff.exe "${dir}/${name1}_expanded.json" "${dir}/${name2}_expanded.json"`);
+                console.log(`windiff.exe "${failedDir}/${name1}_expanded.json" "${failedDir}/${name2}_expanded.json"`);
                 this.windiffCount++;
                 if (this.windiffCount <= 10) {
-                    child_process.exec(`windiff.exe "${dir}/${name1}_expanded.json" "${dir}/${name2}_expanded.json"`);
+                    child_process.exec(
+                        `windiff.exe "${failedDir}/${name1}_expanded.json" "${failedDir}/${name2}_expanded.json"`);
                 } else if (this.windiffCount === 10) {
                     console.error("Launched 10 windiff processes, stopping!");
                 }
@@ -795,41 +839,32 @@ export class ReplayTool {
         }
     }
 
-    private compareSnapshots(content: ContainerContent, filename: string) {
-        // normalize the snapshots
-        const packageVersionRegex = /["\\]+packageVersion["\\]+:["\\]+.+["\\]+/g;
-        const packageVersionPlaceholder = "\"packageVersion\":\"XXX\"";
-        const snapshotAsString = fs.readFileSync(
-            `${filename}.json`,
-            { encoding: "utf-8" }).replace(packageVersionRegex, packageVersionPlaceholder);
-        const contentString =
-            content.snapshotAsString.replace(packageVersionRegex, packageVersionPlaceholder);
+    private compareWithReferenceSnapshot(snapshot: IFileSnapshot, referenceSnapshotFilename: string) {
+        // Read the reference snapshot and covert it to normalized IFileSnapshot.
+        const referenceSnapshotString = fs.readFileSync(`${referenceSnapshotFilename}.json`, "utf-8");
+        const referenceSnapshot = getNormalizedFileSnapshot(JSON.parse(referenceSnapshotString));
 
-        if (snapshotAsString !== contentString) {
-            const fileLines = snapshotAsString.split("\n");
-            const contentLines = contentString.split("\n");
-            let line = 0;
-            const maxLines = Math.max(fileLines.length, contentLines.length);
-            while (line < maxLines && fileLines[line] === contentLines[line]) {
-                line++;
-            }
+        /**
+         * The packageVersion of the snapshot could be different from the reference snapshot. Replace all package
+         * package versions with X before we compare them. This is how it will looks like:
+         * Before replace - "{\"type\":\"https://graph.microsoft.com/types/map\",\"packageVersion\":\"0.28.0-214\"}"
+         * After replace  - "{\"type\":\"https://graph.microsoft.com/types/map\",\"packageVersion\":\"X\"}"
+         */
+        const packageVersionRegex = /\\"packageversion\\":\\".+\\"/gi;
+        const packageVersionPlaceholder = "\\\"packageVersion\\\":\\\"X\\\"";
 
-            const fileLine = fileLines[line] ?? "";
-            const contentLine = contentLines[line] ?? "";
+        const normalizedSnapshot = JSON.parse(
+            JSON.stringify(snapshot, undefined, 2).replace(packageVersionRegex, packageVersionPlaceholder),
+        );
+        const normalizedReferenceSnapshot = JSON.parse(
+            JSON.stringify(referenceSnapshot, undefined, 2).replace(packageVersionRegex, packageVersionPlaceholder),
+        );
 
-            let char = 0;
-            const maxChars = Math.max(fileLine.length, contentLine.length);
-            while (char < maxChars && fileLine.charAt(char) === contentLine.charAt(char)) {
-                char++;
-            }
-
-            const start = Math.max(0, char - 64);
-            const end = char + 64;
-
-            this.reportError(
-                `Mismatch in snapshot ${filename}.json @${line}:${char}
-                +${fileLine.substr(start, end).trim()}
-                -${contentLine.substr(start, end).trim()}`);
+        // Put the assert in a try catch block, so that we can report errors, if any.
+        try {
+            strict.deepStrictEqual(normalizedSnapshot, normalizedReferenceSnapshot);
+        } catch (error) {
+            this.reportError(`Mismatch in snapshot ${referenceSnapshotFilename}.json`, error);
         }
     }
 }

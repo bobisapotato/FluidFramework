@@ -12,6 +12,7 @@ import { UpgradeManager } from "@fluidframework/base-host";
 
 import React from "react";
 import ReactDOM from "react-dom";
+import { IsoBuffer } from "@fluidframework/common-utils";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
 const pkg = require("../package.json");
@@ -65,7 +66,7 @@ export class VersionTest extends DataObject implements IFluidHTMLView {
                 const buffer = await new Promise<Buffer>((resolve, reject) => {
                     arrayBufferReader.onerror = (error) => {
                         arrayBufferReader.abort();
-                        reject(`error: ${JSON.stringify(error)}`);
+                        reject(new Error(`error: ${JSON.stringify(error)}`));
                     };
 
                     arrayBufferReader.onloadend = () => {
@@ -92,7 +93,7 @@ export class VersionTest extends DataObject implements IFluidHTMLView {
             const blobHandle = this.root.get("blob");
             // eslint-disable-next-line @typescript-eslint/strict-boolean-expressions
             const imgSrc = blobHandle
-                ? `data:image/png;base64,${(await blobHandle.get()).toString("base64")}`
+                ? `data:image/png;base64,${IsoBuffer.from(await blobHandle.get()).toString("base64")}`
                 : "https://media.giphy.com/media/13V60VgE2ED7oc/giphy.gif";
 
             ReactDOM.render(

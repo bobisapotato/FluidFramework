@@ -17,7 +17,12 @@ import {
     ITestFluidObject,
     ChannelFactoryRegistry,
 } from "@fluidframework/test-utils";
-import { generateTestWithCompat, ICompatLocalTestObjectProvider, ITestContainerConfig } from "./compatUtils";
+import {
+    generateTest,
+    ITestObjectProvider,
+    ITestContainerConfig,
+    DataObjectFactoryType,
+} from "./compatUtils";
 
 interface ISharedObjectConstructor<T> {
     create(runtime: IFluidDataStoreRuntime, id?: string): T;
@@ -29,12 +34,16 @@ const registry: ChannelFactoryRegistry = [
     [undefined, ConsensusRegisterCollection.getFactory()],
 ];
 const testContainerConfig: ITestContainerConfig = {
-    testFluidDataObject: true,
+    fluidDataObjectType: DataObjectFactoryType.Test,
     registry,
 };
 
 function generate(name: string, ctor: ISharedObjectConstructor<IConsensusRegisterCollection>) {
-    const tests = (args: ICompatLocalTestObjectProvider) => {
+    const tests = (argsFactory: () => ITestObjectProvider) => {
+    let args: ITestObjectProvider;
+    beforeEach(()=>{
+        args = argsFactory();
+    });
         let dataStore1: ITestFluidObject;
         let sharedMap1: ISharedMap;
         let sharedMap2: ISharedMap;
@@ -67,6 +76,8 @@ function generate(name: string, ctor: ISharedObjectConstructor<IConsensusRegiste
                 sharedMap2.wait<IFluidHandle<IConsensusRegisterCollection>>("collection"),
                 sharedMap3.wait<IFluidHandle<IConsensusRegisterCollection>>("collection"),
             ]);
+            assert(collection2Handle);
+            assert(collection3Handle);
             const collection2 = await collection2Handle.get();
             const collection3 = await collection3Handle.get();
 
@@ -90,6 +101,8 @@ function generate(name: string, ctor: ISharedObjectConstructor<IConsensusRegiste
                 sharedMap2.wait<IFluidHandle<IConsensusRegisterCollection>>("collection"),
                 sharedMap3.wait<IFluidHandle<IConsensusRegisterCollection>>("collection"),
             ]);
+            assert(collection2Handle);
+            assert(collection3Handle);
             const collection2 = await collection2Handle.get();
             const collection3 = await collection3Handle.get();
 
@@ -117,6 +130,8 @@ function generate(name: string, ctor: ISharedObjectConstructor<IConsensusRegiste
                 sharedMap2.wait<IFluidHandle<IConsensusRegisterCollection>>("collection"),
                 sharedMap3.wait<IFluidHandle<IConsensusRegisterCollection>>("collection"),
             ]);
+            assert(collection2Handle);
+            assert(collection3Handle);
             const collection2 = await collection2Handle.get();
             const collection3 = await collection3Handle.get();
 
@@ -175,6 +190,7 @@ function generate(name: string, ctor: ISharedObjectConstructor<IConsensusRegiste
             // Pull the collection off of the 2nd container
             const collection2Handle =
                 await sharedMap2.wait<IFluidHandle<IConsensusRegisterCollection>>("collection");
+            assert(collection2Handle);
             const collection2 = await collection2Handle.get();
 
             // acquire one handle in each container
@@ -189,7 +205,7 @@ function generate(name: string, ctor: ISharedObjectConstructor<IConsensusRegiste
     };
 
     describe(name, () => {
-        generateTestWithCompat(tests);
+        generateTest(tests);
     });
 }
 

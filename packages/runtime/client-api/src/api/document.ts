@@ -7,8 +7,7 @@ import { EventEmitter } from "events";
 import * as cell from "@fluidframework/cell";
 import { FluidDataStoreRuntime } from "@fluidframework/datastore";
 import {
-    IDeltaManager,
-    IFluidCodeDetails,
+    IDeltaManager, ILoaderOptions,
 } from "@fluidframework/container-definitions";
 import { Container, Loader } from "@fluidframework/container-loader";
 import { IContainerRuntimeOptions } from "@fluidframework/container-runtime";
@@ -24,7 +23,7 @@ import {
 import { IFluidDataStoreContext } from "@fluidframework/runtime-definitions";
 import * as sequence from "@fluidframework/sequence";
 import { ISharedObject } from "@fluidframework/shared-object-base";
-import { IFluidHandle } from "@fluidframework/core-interfaces";
+import { IFluidHandle, IFluidCodeDetails } from "@fluidframework/core-interfaces";
 import { CodeLoader } from "./codeLoader";
 import { debug } from "./debug";
 
@@ -76,16 +75,8 @@ export class Document extends EventEmitter {
         return this.runtime.existing;
     }
 
-    public get options(): any {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+    public get options(): ILoaderOptions {
         return this.runtime.options;
-    }
-
-    /**
-     * Returns the parent branch for this document
-     */
-    public get parentBranch(): string | null {
-        return this.runtime.parentBranch;
     }
 
     /**
@@ -178,14 +169,6 @@ export class Document extends EventEmitter {
     }
 
     /**
-     * Called to snapshot the given document
-     */
-    // eslint-disable-next-line @typescript-eslint/promise-function-async
-    public snapshot(tagMessage: string = ""): Promise<void> {
-        return this.runtime.snapshot(tagMessage);
-    }
-
-    /**
      * Closes the document and detaches all listeners
      */
     public close() {
@@ -257,7 +240,7 @@ async function requestDocument(loader: Loader, container: Container, uri: string
 export async function load(
     url: string,
     urlResolver: IUrlResolver,
-    options: any = {},
+    options: ILoaderOptions = {},
     documentServiceFactory: IDocumentServiceFactory = defaultDocumentServiceFactory,
     runtimeOptions: IContainerRuntimeOptions = { generateSummaries: false },
 ): Promise<Document> {

@@ -118,6 +118,12 @@ export interface IPersistedCache {
      * Host should ignore sequence numbers that are lower than earlier reported for same file.
      */
     updateUsage(entry: ICacheEntry, seqNumber: number): void;
+
+    /**
+     * Removes the entries from the cache for given parametres.
+     * @param file - file entry to be deleted.
+     */
+    removeEntries(file: IFileEntry): Promise<void>;
 }
 
 /**
@@ -126,7 +132,7 @@ export interface IPersistedCache {
  * (Based off of the same class in promiseCache.ts, could be consolidated)
  */
 class GarbageCollector<TKey> {
-    private readonly gcTimeouts = new Map<TKey, NodeJS.Timeout>();
+    private readonly gcTimeouts = new Map<TKey, ReturnType<typeof setTimeout>>();
 
     constructor(
         private readonly cleanup: (key: TKey) => void,
@@ -187,6 +193,19 @@ export class PersistedCacheWithErrorHandling implements IPersistedCache {
             return undefined;
         }
     }
+
+    async removeEntries(file: IFileEntry): Promise<void> {
+        try {
+            await this.cache.removeEntries(file);
+        } catch (error) {
+            this.logger.sendErrorEvent(
+                {
+                    eventName: "removeCacheEntries",
+                    docId: file.docId,
+                },
+            error);
+        }
+    }
 }
 
 /** Describes how many ops behind snapshot can be for summarizer client to still use it */
@@ -217,6 +236,19 @@ export class LocalPersistentCache implements IPersistedCache {
     }
 
     updateUsage(entry: ICacheEntry, seqNumber: number): void {
+    }
+
+    async removeEntries(file: IFileEntry): Promise<void> {
+        Array.from(this.cache)
+        .filter(([cachekey]) => {
+            const docIdFromKey = cachekey.split("_");
+            if (docIdFromKey[0] === file.docId) {
+                return true;
+            }
+        })
+        .map(([cachekey]) => {
+            this.cache.delete(cachekey);
+        });
     }
 
     private keyFromEntry(entry: ICacheEntry): string {
@@ -270,4 +302,42 @@ export function createOdspCache(
         ...nonpersistentCache,
         persistedCache: new PersistedCacheWithErrorHandling(persistedCache, logger),
     };
+}
+
+export interface IPersistedCacheValueWithEpoch {
+    value: any,
+    fluidEpoch: string | undefined,
+    version: "0.1",
+}
+
+export const persistedCacheValueVersion = "0.1";
+
+export class LocalPersistentCacheAdapter implements IPersistedCache {
+    constructor(private readonly cache: IPersistedCache) {}
+
+    async get(entry: ICacheEntry, expiry?: number): Promise<IPersistedCacheValueWithEpoch> {
+        const value = await this.cache.get(entry, expiry);
+        if (value && value.version !== persistedCacheValueVersion) {
+            const modifiedValue: IPersistedCacheValueWithEpoch = {
+                value,
+                fluidEpoch: undefined,
+                version: persistedCacheValueVersion,
+            };
+            return modifiedValue;
+        }
+        return value as Promise<IPersistedCacheValueWithEpoch>;
+    }
+
+    put(entry: ICacheEntry, value: IPersistedCacheValueWithEpoch, seqNumber: number) {
+        this.cache.put(entry, value, seqNumber);
+    }
+
+    updateUsage(entry: ICacheEntry, seqNumber: number): void {
+        this.cache.updateUsage(entry, seqNumber);
+    }
+
+    async removeEntries(file: IFileEntry): Promise<void> {
+        // eslint-disable-next-line @typescript-eslint/no-floating-promises
+        this.cache.removeEntries(file);
+    }
 }

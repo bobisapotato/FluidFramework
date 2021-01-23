@@ -34,9 +34,14 @@ packages/dds/shared-summary-block/**:
 - agarwal-navin
 - anthony-murphy
 
-packages/driver/**:
+packages/drivers/**:
 - vladsud
 - jatgarg
+- tanviraumi
+- znewton
+
+packages/drivers/odsp-driver/**:
+- GaryWilber
 
 packages/framework/**:
 - skylerjokiel
@@ -75,11 +80,19 @@ packages/utils/tools-utils/**:
 server/**:
 - tanviraumi
 - anthony-murphy
+- GaryWilber
 
 # examples
 examples/**:
 - skylerjokiel
 - ChumpChief
+
+# experimental
+experimental/dds/tree/**:
+- DLehenbauer
+- taylorsw04
+- CraigMacomber
+- Abe27342
 
 # docs
 docs/**:

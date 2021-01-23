@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
 import { parse } from "url";
+import { assert } from "@fluidframework/common-utils";
 import {
     IDocumentService,
     IDocumentServiceFactory,
@@ -19,7 +19,7 @@ import {
     getQuorumValuesFromProtocolSummary,
 } from "@fluidframework/driver-utils";
 import Axios from "axios";
-import { DefaultTokenProvider } from "./defaultTokenProvider";
+import { ChildLogger } from "@fluidframework/telemetry-utils";
 import { DocumentService } from "./documentService";
 import { DocumentService2 } from "./documentService2";
 import { DefaultErrorTracking } from "./errorTracking";
@@ -32,7 +32,7 @@ import { ITokenProvider } from "./tokens";
 export class RouterliciousDocumentServiceFactory implements IDocumentServiceFactory {
     public readonly protocolName = "fluid:";
     constructor(
-        private readonly tokenProvider: ITokenProvider | undefined = undefined,
+        private readonly tokenProvider: ITokenProvider,
         private readonly useDocumentService2: boolean = false,
         private readonly errorTracking: IErrorTrackingService = new DefaultErrorTracking(),
         private readonly disableCache: boolean = false,
@@ -48,7 +48,7 @@ export class RouterliciousDocumentServiceFactory implements IDocumentServiceFact
         logger?: ITelemetryBaseLogger,
     ): Promise<IDocumentService> {
         ensureFluidResolvedUrl(resolvedUrl);
-        assert(resolvedUrl.endpoints.ordererUrl);
+        assert(!!resolvedUrl.endpoints.ordererUrl);
         const parsedUrl = parse(resolvedUrl.url);
         if (!parsedUrl.pathname) {
             throw new Error("Parsed url should contain tenant and doc Id!!");
@@ -100,19 +100,7 @@ export class RouterliciousDocumentServiceFactory implements IDocumentServiceFact
                 `Couldn't parse documentId and/or tenantId. [documentId:${documentId}][tenantId:${tenantId}]`);
         }
 
-        let tokenProvider: ITokenProvider;
-
-        // Fall back to default provider if token provider is not provided.
-        if (this.tokenProvider === undefined) {
-            const jwtToken = fluidResolvedUrl.tokens.jwt;
-            if (!jwtToken) {
-                throw new Error(`No token or provider is present.`);
-            } else {
-                tokenProvider = new DefaultTokenProvider(jwtToken);
-            }
-        } else {
-            tokenProvider = this.tokenProvider;
-        }
+        const logger2 = ChildLogger.create(logger, "RouterliciousDriver");
 
         if (this.useDocumentService2) {
             return new DocumentService2(
@@ -124,7 +112,8 @@ export class RouterliciousDocumentServiceFactory implements IDocumentServiceFact
                 this.disableCache,
                 this.historianApi,
                 this.credentials,
-                tokenProvider,
+                logger2,
+                this.tokenProvider,
                 tenantId,
                 documentId);
         } else {
@@ -138,7 +127,8 @@ export class RouterliciousDocumentServiceFactory implements IDocumentServiceFact
                 this.historianApi,
                 this.credentials,
                 this.gitCache,
-                tokenProvider,
+                logger2,
+                this.tokenProvider,
                 tenantId,
                 documentId);
         }

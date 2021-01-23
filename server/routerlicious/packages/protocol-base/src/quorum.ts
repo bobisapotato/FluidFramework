@@ -3,11 +3,10 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
 // eslint-disable-next-line import/no-internal-modules
 import cloneDeep from "lodash/cloneDeep";
 
-import { Deferred, doIfNotDisposed, EventForwarder, TypedEventEmitter } from "@fluidframework/common-utils";
+import { assert, Deferred, doIfNotDisposed, EventForwarder, TypedEventEmitter } from "@fluidframework/common-utils";
 import {
     ICommittedProposal,
     IPendingProposal,
@@ -42,6 +41,10 @@ class PendingProposal implements IPendingProposal, ISequencedProposal {
         }
 
         this.sendReject(this.sequenceNumber);
+    }
+
+    public get rejectionDisabled() {
+        return !this.canReject;
     }
 
     public disableRejection() {
@@ -137,6 +140,7 @@ export class Quorum extends TypedEventEmitter<IQuorumEvents> implements IQuorum 
     public get(key: string): any {
         const keyMap = this.values.get(key);
         if (keyMap !== undefined) {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-return
             return keyMap.value;
         }
     }
@@ -191,7 +195,7 @@ export class Quorum extends TypedEventEmitter<IQuorumEvents> implements IQuorum 
         const clientSequenceNumber = this.sendProposal(key, value);
         if (clientSequenceNumber < 0) {
             this.emit("error", { eventName: "ProposalInDisconnectedState", key });
-            return Promise.reject(false);
+            return Promise.reject(new Error("Can't proposal in disconnected state"));
         }
 
         const deferred = new Deferred<void>();
@@ -372,7 +376,7 @@ export class Quorum extends TypedEventEmitter<IQuorumEvents> implements IQuorum 
     }
 
     public dispose(): void {
-        assert.fail("Not implemented.");
+        throw new Error("Not implemented.");
         this.isDisposed = true;
     }
 }

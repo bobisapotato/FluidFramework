@@ -8,21 +8,30 @@ import type * as kafkaTypes from "node-rdkafka";
 import { Deferred } from "@fluidframework/common-utils";
 import { IConsumer, IPartition, IPartitionWithEpoch, IQueuedMessage } from "@fluidframework/server-services-core";
 import { ZookeeperClient } from "./zookeeperClient";
-import { IKafkaEndpoints, RdkafkaBase } from "./rdkafkaBase";
+import { IKafkaBaseOptions, IKafkaEndpoints, RdkafkaBase } from "./rdkafkaBase";
 import { tryImportNodeRdkafka } from "./tryImport";
 
 const kafka = tryImportNodeRdkafka();
+
+export interface IKafkaConsumerOptions extends Partial<IKafkaBaseOptions> {
+	consumeTimeout: number;
+	consumeLoopTimeoutDelay: number;
+	optimizedRebalance: boolean;
+	additionalOptions?: kafkaTypes.ConsumerGlobalConfig;
+}
 
 /**
  * Kafka consumer using the node-rdkafka library
  */
 export class RdkafkaConsumer extends RdkafkaBase implements IConsumer {
+	private readonly consumerOptions: IKafkaConsumerOptions;
 	private consumer?: kafkaTypes.KafkaConsumer;
 	private zooKeeperClient?: ZookeeperClient;
 	private closed = false;
 	private isRebalancing = true;
 	private assignedPartitions: Set<number> = new Set();
 	private readonly pendingCommits: Map<number, Deferred<void>> = new Map();
+	private readonly pendingMessages: Map<number, kafkaTypes.Message[]> = new Map();
 	private readonly latestOffsets: Map<number, number> = new Map();
 
 	constructor(
@@ -30,10 +39,15 @@ export class RdkafkaConsumer extends RdkafkaBase implements IConsumer {
 		clientId: string,
 		topic: string,
 		public readonly groupId: string,
-		numberOfPartitions?: number,
-		replicationFactor?: number,
-		private readonly optimizedRebalance?: boolean) {
-		super(endpoints, clientId, topic, numberOfPartitions, replicationFactor);
+		options?: Partial<IKafkaConsumerOptions>) {
+		super(endpoints, clientId, topic, options);
+
+		this.consumerOptions = {
+			consumeTimeout: 1000,
+			consumeLoopTimeoutDelay: 100,
+			optimizedRebalance: false,
+			...options,
+		};
 	}
 
 	protected connect() {
@@ -47,22 +61,24 @@ export class RdkafkaConsumer extends RdkafkaBase implements IConsumer {
 			this.zooKeeperClient = new ZookeeperClient(zooKeeperEndpoint);
 		}
 
-		this.consumer = new kafka.KafkaConsumer(
-			{
-				"metadata.broker.list": this.endpoints.kafka.join(","),
-				"socket.keepalive.enable": true,
-				"socket.nagle.disable": true,
-				"client.id": this.clientId,
-				"group.id": this.groupId,
-				"enable.auto.commit": false,
-				"fetch.min.bytes": 1,
-				"fetch.max.bytes": 1024 * 1024,
-				"offset_commit_cb": true,
-				"rebalance_cb": this.optimizedRebalance ? this.rebalance.bind(this) : true,
-			},
-			{
-				"auto.offset.reset": "latest",
-			});
+		const options: kafkaTypes.ConsumerGlobalConfig = {
+			"metadata.broker.list": this.endpoints.kafka.join(","),
+			"socket.keepalive.enable": true,
+			"socket.nagle.disable": true,
+			"client.id": this.clientId,
+			"group.id": this.groupId,
+			"enable.auto.commit": false,
+			"fetch.min.bytes": 1,
+			"fetch.max.bytes": 1024 * 1024,
+			"offset_commit_cb": true,
+			"rebalance_cb": this.consumerOptions.optimizedRebalance ? this.rebalance.bind(this) : true,
+			...this.consumerOptions.additionalOptions,
+		};
+
+		this.consumer = new kafka.KafkaConsumer(options, { "auto.offset.reset": "latest" });
+
+		this.consumer.setDefaultConsumeTimeout(this.consumerOptions.consumeTimeout);
+		this.consumer.setDefaultConsumeLoopTimeoutDelay(this.consumerOptions.consumeLoopTimeoutDelay);
 
 		this.consumer.on("ready", () => {
 			this.consumer.subscribe([this.topic]);
@@ -84,10 +100,7 @@ export class RdkafkaConsumer extends RdkafkaBase implements IConsumer {
 			this.connect();
 		});
 
-		this.consumer.on("data", (message: kafkaTypes.Message) => {
-			this.latestOffsets.set(message.partition, message.offset);
-			this.emit("data", message as IQueuedMessage);
-		});
+		this.consumer.on("data", this.processMessage.bind(this));
 
 		this.consumer.on("offset.commit", (err, offsets) => {
 			let shouldRetryCommit = false;
@@ -98,7 +111,7 @@ export class RdkafkaConsumer extends RdkafkaBase implements IConsumer {
 				// a rebalance occurred while we were committing
 				// we can resubmit the commit if we still own the partition
 				shouldRetryCommit =
-					this.optimizedRebalance && err.code === kafka.CODES.ERRORS.ERR_ILLEGAL_GENERATION;
+					this.consumerOptions.optimizedRebalance && err.code === kafka.CODES.ERRORS.ERR_ILLEGAL_GENERATION;
 			}
 
 			for (const offset of offsets) {
@@ -129,7 +142,7 @@ export class RdkafkaConsumer extends RdkafkaBase implements IConsumer {
 		this.consumer.on("rebalance", async (err, topicPartitions) => {
 			if (err.code === kafka.CODES.ERRORS.ERR__ASSIGN_PARTITIONS ||
 				err.code === kafka.CODES.ERRORS.ERR__REVOKE_PARTITIONS) {
-				const newAssignedPartitions = new Set(topicPartitions.map((tp) => tp.partition));
+				const newAssignedPartitions = new Set<number>(topicPartitions.map((tp) => tp.partition));
 
 				if (newAssignedPartitions.size === this.assignedPartitions.size &&
 					Array.from(this.assignedPartitions).every((ap) => newAssignedPartitions.has(ap))) {
@@ -152,7 +165,10 @@ export class RdkafkaConsumer extends RdkafkaBase implements IConsumer {
 					}
 				}
 
-				if (!this.optimizedRebalance) {
+				// clear pending messages
+				this.pendingMessages.clear();
+
+				if (!this.consumerOptions.optimizedRebalance) {
 					if (this.isRebalancing) {
 						this.isRebalancing = false;
 					} else {
@@ -163,11 +179,23 @@ export class RdkafkaConsumer extends RdkafkaBase implements IConsumer {
 				this.assignedPartitions = newAssignedPartitions;
 
 				try {
+					this.isRebalancing = true;
 					const partitions = this.getPartitions(this.assignedPartitions);
 					const partitionsWithEpoch = await this.fetchPartitionEpochs(partitions);
 					this.emit("rebalanced", partitionsWithEpoch, err.code);
+					this.isRebalancing = false;
+
+					for (const pendingMessages of this.pendingMessages.values()) {
+						// process messages sent while we were rebalancing for each partition in order
+						for (const pendingMessage of pendingMessages) {
+							this.processMessage(pendingMessage);
+						}
+					}
 				} catch (ex) {
+					this.isRebalancing = false;
 					this.emit("error", ex);
+				} finally {
+					this.pendingMessages.clear();
 				}
 			} else {
 				this.emit("error", err);
@@ -195,15 +223,14 @@ export class RdkafkaConsumer extends RdkafkaBase implements IConsumer {
 			this.closed = true;
 		}
 
-		await new Promise((resolve) => {
-			const consumer = this.consumer;
-			this.consumer = undefined;
-			if (consumer && consumer.isConnected()) {
-				consumer.disconnect(resolve);
+		await new Promise<void>((resolve) => {
+			if (this.consumer && this.consumer.isConnected()) {
+				this.consumer.disconnect(resolve);
 			} else {
 				resolve();
 			}
 		});
+		this.consumer = undefined;
 
 		if (this.zooKeeperClient) {
 			this.zooKeeperClient.close();
@@ -247,6 +274,40 @@ export class RdkafkaConsumer extends RdkafkaBase implements IConsumer {
 	public async resume() {
 		this.consumer?.subscribe([this.topic]);
 		return Promise.resolve();
+	}
+
+	/**
+	 * Saves the latest offset for the partition and emits the data event with the message.
+	 * If we are in the middle of rebalancing and the message was sent for a partition we will own,
+	 * the message will be saved and processed after rebalancing is completed.
+	 * @param message The message
+	 */
+	private processMessage(message: kafkaTypes.Message) {
+		const partition = message.partition;
+
+		if (this.assignedPartitions.has(partition) && this.isRebalancing) {
+			/*
+				It is possible to receive messages while we have not yet finished rebalancing
+				due to how we wait for the fetchPartitionEpochs call to finish before emitting the rebalanced event.
+				This means that the PartitionManager has not yet created the partition,
+				so messages will be lost since they were sent to an "untracked partition".
+				To fix this, we should temporarily store the messages and emit them once we finish rebalancing.
+			*/
+
+			let pendingMessages = this.pendingMessages.get(partition);
+
+			if (!pendingMessages) {
+				pendingMessages = [];
+				this.pendingMessages.set(partition, pendingMessages);
+			}
+
+			pendingMessages.push(message);
+
+			return;
+		}
+
+		this.latestOffsets.set(partition, message.offset);
+		this.emit("data", message as IQueuedMessage);
 	}
 
 	private getPartitions(partitions: Set<number>): IPartition[] {

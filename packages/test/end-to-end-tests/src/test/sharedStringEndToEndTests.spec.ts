@@ -10,21 +10,28 @@ import { SharedString } from "@fluidframework/sequence";
 import {
     ChannelFactoryRegistry,
     ITestFluidObject,
-    OpProcessingController,
 } from "@fluidframework/test-utils";
-import { generateTestWithCompat, ICompatLocalTestObjectProvider, ITestContainerConfig } from "./compatUtils";
+import {
+    generateTest,
+    ITestObjectProvider,
+    ITestContainerConfig,
+    DataObjectFactoryType,
+} from "./compatUtils";
 
 const stringId = "sharedStringKey";
 const registry: ChannelFactoryRegistry = [[stringId, SharedString.getFactory()]];
 const testContainerConfig: ITestContainerConfig = {
-    testFluidDataObject: true,
+    fluidDataObjectType: DataObjectFactoryType.Test,
     registry,
 };
 
-const tests = (args: ICompatLocalTestObjectProvider) => {
+const tests = (argsFactory: () => ITestObjectProvider) => {
+    let args: ITestObjectProvider;
+    beforeEach(()=>{
+        args = argsFactory();
+    });
     let sharedString1: SharedString;
     let sharedString2: SharedString;
-    let opProcessingController: OpProcessingController;
 
     beforeEach(async () => {
         const container1 = await args.makeTestContainer(testContainerConfig) as Container;
@@ -34,9 +41,6 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         const container2 = await args.loadTestContainer(testContainerConfig) as Container;
         const dataObject2 = await requestFluidObject<ITestFluidObject>(container2, "default");
         sharedString2 = await dataObject2.getSharedObject<SharedString>(stringId);
-
-        opProcessingController = new OpProcessingController(args.deltaConnectionServer);
-        opProcessingController.addDeltaManagers(dataObject1.runtime.deltaManager, dataObject2.runtime.deltaManager);
     });
 
     it("can sync SharedString across multiple containers", async () => {
@@ -45,7 +49,7 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         assert.equal(sharedString1.getText(), text, "The retrieved text should match the inserted text.");
 
         // Wait for the ops to to be submitted and processed across the containers.
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         assert.equal(sharedString2.getText(), text, "The inserted text should have synced across the containers");
     });
@@ -56,16 +60,17 @@ const tests = (args: ICompatLocalTestObjectProvider) => {
         assert.equal(sharedString1.getText(), text, "The retrieved text should match the inserted text.");
 
         // Wait for the ops to to be submitted and processed across the containers.
-        await opProcessingController.process();
+        await args.opProcessingController.process();
 
         // Create a initialize a new container with the same id.
         const newContainer = await args.loadTestContainer(testContainerConfig) as Container;
         const newComponent = await requestFluidObject<ITestFluidObject>(newContainer, "default");
         const newSharedString = await newComponent.getSharedObject<SharedString>(stringId);
-        assert.equal(newSharedString.getText(), text, "The new container should receive the inserted text on creation");
+        assert.equal(
+            newSharedString.getText(), text, "The new container should receive the inserted text on creation");
     });
 };
 
 describe("SharedString", () => {
-    generateTestWithCompat(tests);
+    generateTest(tests, { tinylicious: true });
 });

@@ -18,7 +18,7 @@ import {
     ICommittedProposal,
     ITreeEntry,
     SummaryType,
-    ISnapshotTree,
+    ISnapshotTreeEx,
     SummaryObject,
 } from "@fluidframework/protocol-definitions";
 import {
@@ -75,7 +75,7 @@ export class TestDocumentStorage implements IDocumentStorage {
             getQuorumTreeEntries(documentId, sequenceNumber, sequenceNumber, term, quorumSnapshot);
 
         const [protocolTree, appSummaryTree] = await Promise.all([
-            gitManager.createTree({ entries, id: null }),
+            gitManager.createTree({ entries }),
             gitManager.getTree(handle, false),
         ]);
 
@@ -131,8 +131,6 @@ export class TestDocumentStorage implements IDocumentStorage {
                 createTime: Date.now(),
                 deli: JSON.stringify(deli),
                 documentId,
-                forks: [],
-                parent: null,
                 scribe: JSON.stringify(scribe),
                 tenantId,
                 version: "0.1",
@@ -177,19 +175,6 @@ export class TestDocumentStorage implements IDocumentStorage {
         throw new Error("Method not implemented.");
     }
 
-    /**
-     * Retrieves the forks for the given document
-     */
-    public async getForks(tenantId: string, documentId: string): Promise<string[]> {
-        // Not implemented for testDocumentstorage
-        return [];
-    }
-
-    public async createFork(tenantId: string, id: string): Promise<string> {
-        // Not implemented for testDocumentstorage
-        return "";
-    }
-
     private async getOrCreateObject(tenantId: string, documentId: string): Promise<IDocumentDetails> {
         const collection = await this.databaseManager.getDocumentCollection();
         const result = await collection.findOrCreate(
@@ -201,8 +186,6 @@ export class TestDocumentStorage implements IDocumentStorage {
                 createTime: Date.now(),
                 deli: undefined,
                 documentId,
-                forks: [],
-                parent: null,
                 scribe: undefined,
                 tenantId,
                 version: "0.1",
@@ -223,7 +206,7 @@ export async function writeSummaryTree(
     manager: IGitManager,
     summaryTree: ISummaryTree,
     blobsShaCache: Set<string>,
-    snapshot: ISnapshotTree | undefined,
+    snapshot: ISnapshotTreeEx | undefined,
 ): Promise<string> {
     const entries = await Promise.all(Object.keys(summaryTree.tree).map(async (key) => {
         const entry = summaryTree.tree[key];
@@ -246,7 +229,7 @@ async function writeSummaryTreeObject(
     blobsShaCache: Set<string>,
     key: string,
     object: SummaryObject,
-    snapshot: ISnapshotTree | undefined,
+    snapshot: ISnapshotTreeEx | undefined,
     currentPath = "",
 ): Promise<string> {
     switch (object.type) {
@@ -271,7 +254,7 @@ async function writeSummaryTreeObject(
 function getIdFromPath(
     handleType: SummaryType,
     handlePath: string,
-    fullSnapshot: ISnapshotTree,
+    fullSnapshot: ISnapshotTreeEx,
 ): string {
     const path = handlePath.split("/").map((part) => decodeURIComponent(part));
     if (path[0] === "") {
@@ -285,24 +268,16 @@ function getIdFromPath(
 function getIdFromPathCore(
     handleType: SummaryType,
     path: string[],
-    snapshot: ISnapshotTree,
+    snapshot: ISnapshotTreeEx,
 ): string {
     const key = path[0];
     if (path.length === 1) {
         switch (handleType) {
             case SummaryType.Blob: {
-                const tryId = snapshot.blobs[key];
-                if (!tryId) {
-                    throw Error("Parent summary does not have blob handle for specified path.");
-                }
-                return tryId;
+                return snapshot.blobs[key];
             }
             case SummaryType.Tree: {
-                const tryId = snapshot.trees[key]?.id;
-                if (!tryId) {
-                    throw Error("Parent summary does not have tree handle for specified path.");
-                }
-                return tryId;
+                return snapshot.trees[key]?.id;
             }
             default:
                 throw Error(`Unexpected handle summary object type: "${handleType}".`);

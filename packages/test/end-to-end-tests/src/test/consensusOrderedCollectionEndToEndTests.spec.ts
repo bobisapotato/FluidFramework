@@ -4,6 +4,7 @@
  */
 
 import { strict as assert } from "assert";
+import { IContainer } from "@fluidframework/container-definitions";
 import { IFluidHandle } from "@fluidframework/core-interfaces";
 import { IFluidDataStoreRuntime } from "@fluidframework/datastore-definitions";
 import { ISharedMap, SharedMap } from "@fluidframework/map";
@@ -16,11 +17,15 @@ import {
 } from "@fluidframework/ordered-collection";
 import { requestFluidObject } from "@fluidframework/runtime-utils";
 import {
-    OpProcessingController,
     ITestFluidObject,
     ChannelFactoryRegistry,
 } from "@fluidframework/test-utils";
-import { generateTestWithCompat, ICompatLocalTestObjectProvider, ITestContainerConfig } from "./compatUtils";
+import {
+    generateTest,
+    ITestObjectProvider,
+    ITestContainerConfig,
+    DataObjectFactoryType,
+} from "./compatUtils";
 
 interface ISharedObjectConstructor<T> {
     create(runtime: IFluidDataStoreRuntime, id?: string): T;
@@ -32,15 +37,20 @@ const registry: ChannelFactoryRegistry = [
     [undefined, ConsensusQueue.getFactory()],
 ];
 const testContainerConfig: ITestContainerConfig = {
-    testFluidDataObject: true,
+    fluidDataObjectType: DataObjectFactoryType.Test,
     registry,
 };
 
 function generate(
     name: string, ctor: ISharedObjectConstructor<IConsensusOrderedCollection>,
     input: any[], output: any[]) {
-    const tests = (args: ICompatLocalTestObjectProvider) => {
-        let opProcessingController: OpProcessingController;
+    const tests = (argsFactory: () => ITestObjectProvider) => {
+    let args: ITestObjectProvider;
+    beforeEach(()=>{
+        args = argsFactory();
+    });
+        let container1: IContainer;
+        let container2: IContainer;
         let dataStore1: ITestFluidObject;
         let dataStore2: ITestFluidObject;
         let sharedMap1: ISharedMap;
@@ -49,12 +59,12 @@ function generate(
 
         beforeEach(async () => {
             // Create a Container for the first client.
-            const container1 = await args.makeTestContainer(testContainerConfig);
+            container1 = await args.makeTestContainer(testContainerConfig);
             dataStore1 = await requestFluidObject<ITestFluidObject>(container1, "default");
             sharedMap1 = await dataStore1.getSharedObject<SharedMap>(mapId);
 
             // Load the Container that was created by the first client.
-            const container2 = await args.loadTestContainer(testContainerConfig);
+            container2 = await args.loadTestContainer(testContainerConfig);
             dataStore2 = await requestFluidObject<ITestFluidObject>(container2, "default");
             sharedMap2 = await dataStore2.getSharedObject<SharedMap>(mapId);
 
@@ -62,11 +72,6 @@ function generate(
             const container3 = await args.loadTestContainer(testContainerConfig);
             const dataStore3 = await requestFluidObject<ITestFluidObject>(container3, "default");
             sharedMap3 = await dataStore3.getSharedObject<SharedMap>(mapId);
-
-            opProcessingController = new OpProcessingController(args.deltaConnectionServer);
-            opProcessingController.addDeltaManagers(
-                dataStore1.runtime.deltaManager,
-                dataStore2.runtime.deltaManager);
         });
 
         it("Should initialize after attach", async () => {
@@ -80,6 +85,8 @@ function generate(
                 sharedMap2.wait<IFluidHandle<IConsensusOrderedCollection>>("collection"),
                 sharedMap3.wait<IFluidHandle<IConsensusOrderedCollection>>("collection"),
             ]);
+            assert(collection2Handle);
+            assert(collection3Handle);
             const collection2 = await collection2Handle.get();
             const collection3 = await collection3Handle.get();
 
@@ -110,30 +117,32 @@ function generate(
                 sharedMap2.wait<IFluidHandle<IConsensusOrderedCollection>>("collection"),
                 sharedMap3.wait<IFluidHandle<IConsensusOrderedCollection>>("collection"),
             ]);
+            assert(collection2Handle);
+            assert(collection3Handle);
             const collection2 = await collection2Handle.get();
             const collection3 = await collection3Handle.get();
 
-            await opProcessingController.pauseProcessing();
+            await args.opProcessingController.pauseProcessing();
 
             const addP: Promise<void>[] = [];
             for (const item of input) {
                 addP.push(collection1.add(item));
             }
-            await opProcessingController.process();
+            await args.opProcessingController.process();
             await Promise.all(addP);
 
             const removeP1 = acquireAndComplete(collection3);
             // drain the outgoing so that the next set will come after
-            await opProcessingController.processOutgoing();
+            await args.opProcessingController.processOutgoing();
             const removeP2 = acquireAndComplete(collection2);
             // drain the outgoing so that the next set will come after
-            await opProcessingController.processOutgoing();
+            await args.opProcessingController.processOutgoing();
             const removeP3 = acquireAndComplete(collection1);
 
             const removeEmptyP = acquireAndComplete(collection1);
 
             // Now process all the incoming and outgoing
-            await opProcessingController.process();
+            await args.opProcessingController.process();
 
             // Verify the value is in the correct order
             assert.strictEqual(await removeP1, output[0], "Unexpected value in document 1");
@@ -150,13 +159,15 @@ function generate(
                 sharedMap2.wait<IFluidHandle<IConsensusOrderedCollection>>("collection"),
                 sharedMap3.wait<IFluidHandle<IConsensusOrderedCollection>>("collection"),
             ]);
+            assert(collection2Handle);
+            assert(collection3Handle);
             const collection2 = await collection2Handle.get();
             const collection3 = await collection3Handle.get();
 
-            await opProcessingController.pauseProcessing();
+            await args.opProcessingController.pauseProcessing();
 
             const waitOn2P = waitAcquireAndComplete(collection2);
-            await opProcessingController.process();
+            await args.opProcessingController.process();
             let added = false;
             waitOn2P.then(
                 (value) => {
@@ -170,28 +181,28 @@ function generate(
 
             const addP1 = collection1.add(input[0]);
             // drain the outgoing so that the next set will come after
-            await opProcessingController.processOutgoing();
+            await args.opProcessingController.processOutgoing();
             const addP2 = collection3.add(input[1]);
             // drain the outgoing so that the next set will come after
-            await opProcessingController.processOutgoing();
+            await args.opProcessingController.processOutgoing();
             const addP3 = collection2.add(input[2]);
             // drain the outgoing so that the next set will come after
-            await opProcessingController.processOutgoing();
+            await args.opProcessingController.processOutgoing();
             added = true;
 
             // Now process the incoming
-            await opProcessingController.process();
+            await args.opProcessingController.process();
             await Promise.all([addP1, addP2, addP3]);
             assert.strictEqual(await waitOn2P, output[0],
                 "Unexpected wait before add resolved value in document 2 added in document 1");
 
             const waitOn1P = waitAcquireAndComplete(collection1);
-            await opProcessingController.process();
+            await args.opProcessingController.process();
             assert.strictEqual(await waitOn1P, output[1],
                 "Unexpected wait after add resolved value in document 1 added in document 3");
 
             const waitOn3P = waitAcquireAndComplete(collection3);
-            await opProcessingController.process();
+            await args.opProcessingController.process();
             assert.strictEqual(await waitOn3P, output[2],
                 "Unexpected wait after add resolved value in document 13added in document 2");
         });
@@ -207,6 +218,7 @@ function generate(
             // Pull the collection off of the 2nd container
             const collection2Handle =
                 await sharedMap2.wait<IFluidHandle<IConsensusOrderedCollection>>("collection");
+            assert(collection2Handle);
             const collection2 = await collection2Handle.get();
 
             // acquire one handle in each container
@@ -225,6 +237,7 @@ function generate(
 
             const collection2Handle =
                 await sharedMap2.wait<IFluidHandle<IConsensusOrderedCollection>>("collection");
+            assert(collection2Handle);
             const collection2 = await collection2Handle.get();
 
             await collection1.add("testValue");
@@ -246,12 +259,13 @@ function generate(
 
             const collection2Handle =
                 await sharedMap2.wait<IFluidHandle<IConsensusOrderedCollection>>("collection");
+            assert(collection2Handle);
             const collection2 = await collection2Handle.get();
 
             let waitRejected = false;
             waitAcquireAndComplete(collection2)
                 .catch(() => { waitRejected = true; });
-            dataStore2.runtime.deltaManager.close();
+            container2.deltaManager.close();
 
             await collection1.add("testValue");
 
@@ -268,9 +282,11 @@ function generate(
                 sharedMap2.wait<IFluidHandle<IConsensusOrderedCollection>>("collection"),
                 sharedMap3.wait<IFluidHandle<IConsensusOrderedCollection>>("collection"),
             ]);
+            assert(collection2Handle);
+            assert(collection3Handle);
             const collection2 = await collection2Handle.get();
             const collection3 = await collection3Handle.get();
-            await opProcessingController.pauseProcessing();
+            await args.opProcessingController.pauseProcessing();
 
             let addCount1 = 0;
             let addCount2 = 0;
@@ -308,26 +324,26 @@ function generate(
             const p: Promise<void>[] = [];
             p.push(collection1.add(input[0]));
             // drain the outgoing so that the next set will come after
-            await opProcessingController.processOutgoing();
+            await args.opProcessingController.processOutgoing();
             p.push(collection2.add(input[1]));
             // drain the outgoing so that the next set will come after
-            await opProcessingController.processOutgoing();
+            await args.opProcessingController.processOutgoing();
             p.push(collection3.add(input[2]));
             // drain the outgoing so that the next set will come after
-            await opProcessingController.processOutgoing();
+            await args.opProcessingController.processOutgoing();
             p.push(acquireAndComplete(collection2));
             // drain the outgoing so that the next set will come after
-            await opProcessingController.processOutgoing();
+            await args.opProcessingController.processOutgoing();
             p.push(acquireAndComplete(collection3));
             // drain the outgoing so that the next set will come after
-            await opProcessingController.processOutgoing();
+            await args.opProcessingController.processOutgoing();
             p.push(acquireAndComplete(collection1));
             // drain the outgoing so that the next set will come after
-            await opProcessingController.processOutgoing();
+            await args.opProcessingController.processOutgoing();
             const removeEmptyP = acquireAndComplete(collection1);
 
             // Now process all
-            await opProcessingController.process();
+            await args.opProcessingController.process();
             await Promise.all(p);
             assert.strictEqual(await removeEmptyP, undefined, "Remove of empty collection should be undefined");
             assert.strictEqual(addCount1, 3, "Incorrect number add events in document 1");
@@ -340,7 +356,7 @@ function generate(
     };
 
     describe(name, () => {
-        generateTestWithCompat(tests);
+        generateTest(tests, { tinylicious: true });
     });
 }
 

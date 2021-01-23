@@ -6,8 +6,10 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as util from "util";
-import * as git from "nodegit";
+import git from "nodegit";
 import * as resources from "@fluidframework/gitresources";
+import { IGetRefParamsExternal } from "@fluidframework/server-services-client";
+import * as winston from "winston";
 
 const exists = util.promisify(fs.exists);
 
@@ -49,6 +51,17 @@ function committerToICommitter(committer: git.Signature, time: Date): resources.
 
 function oidToCommitHash(oid: git.Oid): resources.ICommitHash {
     return { sha: oid.tostrS(), url: "" };
+}
+
+/**
+ * Helper function to decode externalstorage read params
+ */
+export function getReadParams(params): IGetRefParamsExternal | undefined {
+    if (params) {
+        const getRefParams: IGetRefParamsExternal = JSON.parse(decodeURIComponent(params));
+        return getRefParams;
+    }
+    return undefined;
 }
 
 /**
@@ -100,6 +113,7 @@ export class RepositoryManager {
         const isBare: any = 1;
         const repository = git.Repository.init(`${this.baseDir}/${repoPath}`, isBare);
         this.repositoryCache[repoPath] = repository;
+        winston.info(`Created a new repo for owner ${owner} reponame: ${name}`);
 
         return repository;
     }
@@ -111,7 +125,8 @@ export class RepositoryManager {
             const directory = `${this.baseDir}/${repoPath}`;
 
             if (!await exists(directory)) {
-                return Promise.reject("Repo does not exist");
+                winston.info(`Repo does not exist ${directory}`);
+                return Promise.reject(`Repo does not exist ${directory}`);
             }
 
             this.repositoryCache[repoPath] = git.Repository.open(directory);

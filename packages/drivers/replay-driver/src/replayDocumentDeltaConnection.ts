@@ -11,10 +11,10 @@ import {
 } from "@fluidframework/driver-definitions";
 import {
     ConnectionMode,
+    IClientConfiguration,
     IConnected,
     IDocumentMessage,
     ISequencedDocumentMessage,
-    IServiceConfiguration,
     ISignalClient,
     ISignalMessage,
     ITokenClaims,
@@ -64,11 +64,15 @@ export class ReplayControllerStatic extends ReplayController {
     }
 
     public async getSnapshotTree(version?: IVersion) {
-        return version ? Promise.reject("Invalid operation") : null;
+        return version ? Promise.reject(new Error("Invalid operation")) : null;
     }
 
     public async read(blobId: string): Promise<string> {
-        return Promise.reject("Invalid operation");
+        return Promise.reject(new Error("Invalid operation"));
+    }
+
+    public async readBlob(blobId: string): Promise<ArrayBufferLike> {
+        return Promise.reject(new Error("Invalid operation"));
     }
 
     public async getStartingOpSequence(): Promise<number> {
@@ -204,6 +208,7 @@ export class ReplayDocumentDeltaConnection
             initialClients: [],
             maxMessageSize: ReplayDocumentDeltaConnection.ReplayMaxMessageSize,
             mode: "write",
+            // Back-compat, removal tracked with issue #4346
             parentBranch: null,
             serviceConfiguration: {
                 blockSize: 64436,
@@ -236,6 +241,9 @@ export class ReplayDocumentDeltaConnection
         user: {
             id: "",
         },
+        iat: Math.round(new Date().getTime() / 1000),
+        exp: Math.round(new Date().getTime() / 1000) + 60 * 60, // 1 hour expiration
+        ver: "1.0",
     };
 
     public get clientId(): string {
@@ -254,10 +262,6 @@ export class ReplayDocumentDeltaConnection
         return this.details.existing;
     }
 
-    public get parentBranch(): string | null {
-        return this.details.parentBranch;
-    }
-
     public get version(): string {
         return this.details.version;
     }
@@ -274,7 +278,7 @@ export class ReplayDocumentDeltaConnection
         return this.details.initialClients;
     }
 
-    public get serviceConfiguration(): IServiceConfiguration {
+    public get serviceConfiguration(): IClientConfiguration {
         return this.details.serviceConfiguration;
     }
 

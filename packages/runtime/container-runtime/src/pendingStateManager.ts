@@ -3,28 +3,14 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
-import { IErrorBase } from "@fluidframework/container-definitions";
-import { CustomErrorWithProps } from "@fluidframework/telemetry-utils";
-import { ITelemetryProperties } from "@fluidframework/common-definitions";
+import { assert } from "@fluidframework/common-utils";
+import { DataCorruptionError } from "@fluidframework/container-utils";
 import {
     ISequencedDocumentMessage,
 } from "@fluidframework/protocol-definitions";
 import { FlushMode } from "@fluidframework/runtime-definitions";
 import Deque from "double-ended-queue";
 import { ContainerRuntime, ContainerMessageType } from "./containerRuntime";
-
-export class DataCorruptionError extends CustomErrorWithProps implements IErrorBase {
-    readonly errorType = "dataCorruptionError";
-    readonly canRetry = false;
-
-    constructor(
-        errorMessage: string,
-        props: ITelemetryProperties,
-    ) {
-        super(errorMessage, props);
-    }
-}
 
 /**
  * This represents a message that has been submitted and is added to the pending queue when `submit` is called on the
@@ -36,6 +22,7 @@ interface IPendingMessage {
     clientSequenceNumber: number;
     content: any;
     localOpMetadata: unknown;
+    opMetadata: Record<string, unknown> | undefined;
 }
 
 /**
@@ -107,13 +94,16 @@ export class PendingStateManager {
         type: ContainerMessageType,
         clientSequenceNumber: number,
         content: any,
-        localOpMetadata: unknown) {
+        localOpMetadata: unknown,
+        opMetadata: Record<string, unknown> | undefined,
+    ) {
         const pendingMessage: IPendingMessage = {
             type: "message",
             messageType: type,
             clientSequenceNumber,
             content,
             localOpMetadata,
+            opMetadata,
         };
 
         this.pendingStates.push(pendingMessage);
@@ -290,7 +280,7 @@ export class PendingStateManager {
      */
     private peekNextPendingState(): IPendingState {
         const nextPendingState = this.pendingStates.peekFront();
-        assert(nextPendingState, "No pending state found for the remote message");
+        assert(!!nextPendingState, "No pending state found for the remote message");
         return nextPendingState;
     }
 
@@ -328,7 +318,8 @@ export class PendingStateManager {
                         this.containerRuntime.reSubmitFn(
                             pendingState.messageType,
                             pendingState.content,
-                            pendingState.localOpMetadata);
+                            pendingState.localOpMetadata,
+                            pendingState.opMetadata);
                     }
                     break;
                 case "flushMode":

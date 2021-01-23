@@ -3,15 +3,15 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
+import { assert , fromBase64ToUtf8 } from "@fluidframework/common-utils";
 import { IRequest } from "@fluidframework/core-interfaces";
-import { fromBase64ToUtf8 } from "@fluidframework/common-utils";
 import { IResolvedUrl, IUrlResolver } from "@fluidframework/driver-definitions";
 import { createOdspUrl, OdspDriverUrlResolver } from "@fluidframework/odsp-driver";
 
-const fluidOfficeServers = [
+const fluidOfficeAndOneNoteServers = [
     "dev.fluidpreview.office.net",
     "fluidpreview.office.net",
+    "www.onenote.com",
 ];
 
 export class FluidAppOdspUrlResolver implements IUrlResolver {
@@ -19,13 +19,13 @@ export class FluidAppOdspUrlResolver implements IUrlResolver {
         const reqUrl = new URL(request.url);
         const server = reqUrl.hostname.toLowerCase();
         let contents: { drive: string; item: string; site: string } | undefined;
-        if (fluidOfficeServers.includes(server)) {
+        if (fluidOfficeAndOneNoteServers.includes(server)) {
             // eslint-disable-next-line @typescript-eslint/no-use-before-define
-            contents = await initializeFluidOffice(reqUrl);
+            contents = await initializeFluidOfficeOrOneNote(reqUrl);
         } else if (server === "www.office.com") {
             const getRequiredParam = (name: string): string => {
                 const value = reqUrl.searchParams.get(name);
-                assert(value, `Missing ${name} from office.com URL parameter`);
+                assert(!!value, `Missing ${name} from office.com URL parameter`);
                 return value;
             };
             contents = {
@@ -53,17 +53,17 @@ export class FluidAppOdspUrlResolver implements IUrlResolver {
     }
 }
 
-async function initializeFluidOffice(urlSource: URL) {
+async function initializeFluidOfficeOrOneNote(urlSource: URL) {
     const pathname = urlSource.pathname;
     // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
-    const siteDriveItemMatch = pathname.match(/\/p\/([^/]*)\/([^/]*)\/([^/]*)/);
+    const siteDriveItemMatch = pathname.match(/\/(p|preview)\/([^/]*)\/([^/]*)\/([^/]*)/);
 
     // eslint-disable-next-line no-null/no-null
     if (siteDriveItemMatch === null) {
         return undefined;
     }
 
-    const site = decodeURIComponent(siteDriveItemMatch[1]);
+    const site = decodeURIComponent(siteDriveItemMatch[2]);
 
     // Path value is base64 encoded so need to decode first
     const decodedSite = fromBase64ToUtf8(site);
@@ -72,12 +72,12 @@ async function initializeFluidOffice(urlSource: URL) {
     const storageType = decodedSite.split(":")[0];
     const expectedStorageType = "spo";  // Only support spo for now
     if (storageType !== expectedStorageType) {
-        return Promise.reject(`Unexpected storage type ${storageType}, expected: ${expectedStorageType}`);
+        return Promise.reject(new Error(`Unexpected storage type ${storageType}, expected: ${expectedStorageType}`));
     }
 
     // Since we have the drive and item, only take the host ignore the rest
     const siteUrl = decodedSite.substring(storageType.length + 1);
-    const drive = decodeURIComponent(siteDriveItemMatch[2]);
-    const item = decodeURIComponent(siteDriveItemMatch[3]);
+    const drive = decodeURIComponent(siteDriveItemMatch[3]);
+    const item = decodeURIComponent(siteDriveItemMatch[4]);
     return { site: siteUrl, drive, item };
 }

@@ -153,6 +153,7 @@
                     "@fluidframework/agent-scheduler"
                 ],
                 "dirs": [
+                    "experimental/dds/",
                     "packages/dds/",
                     "packages/runtime/"
                 ],
@@ -164,7 +165,8 @@
             },
             "Framework": {
                 "packages": [
-                    "@fluid-internal/client-api"
+                    "@fluid-internal/client-api",
+                    "@fluid-experimental/experimental-fluidframework"
                 ],
                 "dirs": [
                     "packages/framework/"
@@ -211,6 +213,7 @@
             "Test": {
                 "dev": true,
                 "packages": [
+                    "@fluid-internal/test-dds-utils",
                     "@fluidframework/local-driver",
                     "@fluidframework/test-runtime-utils",
                     "@fluidframework/webpack-fluid-loader"
@@ -256,7 +259,8 @@
             "Routerlicious-Driver": {
                 "packages": [
                     "@fluidframework/routerlicious-driver",
-                    "@fluidframework/routerlicious-urlresolver"
+                    "@fluidframework/routerlicious-urlresolver",
+                    "@fluidframework/tinylicious-driver"
                 ],
                 "deps": [
                     "Driver",

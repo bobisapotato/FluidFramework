@@ -3,9 +3,8 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
 import { IDeltaQueue, IDeltaQueueEvents } from "@fluidframework/container-definitions";
-import { Deferred, TypedEventEmitter } from "@fluidframework/common-utils";
+import { assert, Deferred, TypedEventEmitter } from "@fluidframework/common-utils";
 import Deque from "double-ended-queue";
 
 export class DeltaQueue<T> extends TypedEventEmitter<IDeltaQueueEvents<T>> implements IDeltaQueue<T> {
@@ -13,14 +12,10 @@ export class DeltaQueue<T> extends TypedEventEmitter<IDeltaQueueEvents<T>> imple
     private readonly q = new Deque<T>();
 
     /**
-     * Tracks whether the system has requested the queue be paused.
+     * Tracks the number of pause requests for the queue
+     * The DeltaQueue is create initially paused.
      */
-    private sysPause = true;
-
-    /**
-     * Tracks whether the user of the container has requested the queue be paused.
-     */
-    private userPause = false;
+    private pauseCount = 1;
 
     private error: any | undefined;
 
@@ -38,9 +33,7 @@ export class DeltaQueue<T> extends TypedEventEmitter<IDeltaQueueEvents<T>> imple
      * @returns True if the queue is paused, false if not.
      */
     public get paused(): boolean {
-        // The queue can be paused by either the user or by the system (e.g. during snapshotting).  If either requests
-        // a pause, then the queue will pause.
-        return this.sysPause || this.userPause;
+        return this.pauseCount !== 0;
     }
 
     public get length(): number {
@@ -62,7 +55,7 @@ export class DeltaQueue<T> extends TypedEventEmitter<IDeltaQueueEvents<T>> imple
     }
 
     public dispose() {
-        assert.fail("Not implemented.");
+        throw new Error("Not implemented.");
         this.isDisposed = true;
     }
 
@@ -85,7 +78,7 @@ export class DeltaQueue<T> extends TypedEventEmitter<IDeltaQueueEvents<T>> imple
     }
 
     public async pause(): Promise<void> {
-        this.userPause = true;
+        this.pauseCount++;
         // If called from within the processing loop, we are in the middle of processing an op. Return a promise
         // that will resolve when processing has actually stopped.
         if (this.processingDeferred !== undefined) {
@@ -94,26 +87,21 @@ export class DeltaQueue<T> extends TypedEventEmitter<IDeltaQueueEvents<T>> imple
     }
 
     public resume(): void {
-        this.userPause = false;
+        assert(this.pauseCount > 0);
+        this.pauseCount--;
         if (!this.paused) {
             this.ensureProcessing();
         }
     }
 
+    // back-compat: usage removed in 0.33, remove in future versions
     public async systemPause(): Promise<void> {
-        this.sysPause = true;
-        // If called from within the processing loop, we are in the middle of processing an op. Return a promise
-        // that will resolve when processing has actually stopped.
-        if (this.processingDeferred !== undefined) {
-            return this.processingDeferred.promise;
-        }
+        return this.pause();
     }
 
+    // back-compat: usage removed in 0.33, remove in future versions
     public systemResume(): void {
-        this.sysPause = false;
-        if (!this.paused) {
-            this.ensureProcessing();
-        }
+        this.resume();
     }
 
     /**

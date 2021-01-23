@@ -3,14 +3,13 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
 import {
     IFluidObject,
     IFluidRouter,
     IRequest,
     IResponse,
 } from "@fluidframework/core-interfaces";
-import { FluidDataStoreRuntime } from "@fluidframework/datastore";
+import { mixinRequestHandler } from "@fluidframework/datastore";
 import {
     IContainerContext,
     IRuntime,
@@ -30,11 +29,8 @@ import {
     innerRequestHandler,
     buildRuntimeRequestHandler,
 } from "@fluidframework/request-handler";
-import { defaultRouteRequestHandler } from "@fluidframework/aqueduct";
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-const pkg = require("../package.json");
-export const ComponentName = pkg.name;
+import { defaultFluidObjectRequestHandler, defaultRouteRequestHandler } from "@fluidframework/aqueduct";
+import { assert } from "@fluidframework/common-utils";
 
 export const IKeyValue: keyof IProvideKeyValue = "IKeyValue";
 
@@ -68,7 +64,7 @@ class KeyValue implements IKeyValue, IFluidObject, IFluidRouter {
     private _root: ISharedMap | undefined;
 
     public get root() {
-        assert(this._root);
+        assert(!!this._root);
         return this._root;
     }
 
@@ -93,11 +89,7 @@ class KeyValue implements IKeyValue, IFluidObject, IFluidRouter {
     }
 
     public async request(request: IRequest): Promise<IResponse> {
-        return {
-            mimeType: "fluid/object",
-            status: 200,
-            value: this,
-        };
+        return defaultFluidObjectRequestHandler(this, request);
     }
 
     private async initialize() {
@@ -122,16 +114,14 @@ export class KeyValueFactoryComponent implements IRuntimeFactory, IFluidDataStor
         const mapFactory = SharedMap.getFactory();
         dataTypes.set(mapFactory.type, mapFactory);
 
-        const runtime = FluidDataStoreRuntime.load(
-            context,
-            dataTypes,
-        );
+        const runtimeClass = mixinRequestHandler(
+            async (request: IRequest) => {
+                const router = await routerP;
+                return router.request(request);
+            });
 
-        const keyValueP = KeyValue.load(runtime, context);
-        runtime.registerRequestHandler(async (request: IRequest) => {
-            const keyValue = await keyValueP;
-            return keyValue.request(request);
-        });
+        const runtime = new runtimeClass(context, dataTypes);
+        const routerP = KeyValue.load(runtime, context);
 
         return runtime;
     }
@@ -139,7 +129,7 @@ export class KeyValueFactoryComponent implements IRuntimeFactory, IFluidDataStor
     public async instantiateRuntime(context: IContainerContext): Promise<IRuntime> {
         const runtime: ContainerRuntime = await ContainerRuntime.load(
             context,
-            new Map([[ComponentName, Promise.resolve(this)]]),
+            new Map([[this.type, Promise.resolve(this)]]),
             buildRuntimeRequestHandler(
                 defaultRouteRequestHandler(this.defaultComponentId),
                 innerRequestHandler,
@@ -147,7 +137,7 @@ export class KeyValueFactoryComponent implements IRuntimeFactory, IFluidDataStor
         );
 
         if (!runtime.existing) {
-            await runtime.createRootDataStore(ComponentName, this.defaultComponentId);
+            await runtime.createRootDataStore(this.type, this.defaultComponentId);
         }
 
         return runtime;

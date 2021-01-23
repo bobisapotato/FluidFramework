@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+import { fromBase64ToUtf8, fromUtf8ToBase64 } from "@fluidframework/common-utils";
 import { OdspFluidDataStoreLocator } from "./contracts";
 import { OdcFileSiteOrigin, OdcApiSiteOrigin } from "./constants";
 
@@ -13,6 +14,7 @@ const fluidDriveIdParamName = "d";
 const fluidFileIdParamName = "f";
 const fluidDataStorePathParamName = "c";
 const fluidAppNameParamName = "a";
+const fluidContainerPackageNameParamName = "p";
 
 /**
  * Transforms given Fluid data store locator into string that can be embedded into url
@@ -32,8 +34,12 @@ export function encodeOdspFluidDataStoreLocator(locator: OdspFluidDataStoreLocat
     if (locator.appName) {
         locatorSerialized += `&${fluidAppNameParamName}=${encodeURIComponent(locator.appName)}`;
     }
+    if (locator.containerPackageName) {
+        locatorSerialized += `&${fluidContainerPackageNameParamName}=${
+            encodeURIComponent(locator.containerPackageName)}`;
+    }
 
-    return btoa(locatorSerialized);
+    return fromUtf8ToBase64(locatorSerialized);
 }
 
 /**
@@ -47,7 +53,7 @@ function decodeOdspFluidDataStoreLocator(
     encodedLocatorValue: string,
     siteOriginUrl: string,
 ): OdspFluidDataStoreLocator | undefined {
-    const locatorInfo = new URLSearchParams(atob(encodedLocatorValue));
+    const locatorInfo = new URLSearchParams(fromBase64ToUtf8(encodedLocatorValue));
 
     const signatureValue = locatorInfo.get(fluidSignatureParamName);
     if (signatureValue !== "1") {
@@ -59,6 +65,7 @@ function decodeOdspFluidDataStoreLocator(
     const fileId = locatorInfo.get(fluidFileIdParamName);
     const dataStorePath = locatorInfo.get(fluidDataStorePathParamName);
     const appName = locatorInfo.get(fluidAppNameParamName) ?? undefined;
+    const containerPackageName = locatorInfo.get(fluidContainerPackageNameParamName) ?? undefined;
     // "" is a valid value for dataStorePath so simply check for absence of the param;
     // the rest of params must be present and non-empty
     if (!sitePath || !driveId || !fileId || dataStorePath === null) {
@@ -82,6 +89,7 @@ function decodeOdspFluidDataStoreLocator(
         fileId,
         dataStorePath,
         appName,
+        containerPackageName,
     };
 }
 
@@ -100,7 +108,8 @@ export function storeLocatorInOdspUrl(url: URL, locator: OdspFluidDataStoreLocat
 }
 
 /**
- * Extract ODSP Fluid data store locator object from given ODSP url
+ * Extract ODSP Fluid data store locator object from given ODSP url. This extracts things like
+ * driveId, ItemId, siteUrl etc from a url where these are encoded in nav query param.
  * @param url - ODSP url representing Fluid file link
  * @returns object representing Fluid data store location in ODSP terms
  */

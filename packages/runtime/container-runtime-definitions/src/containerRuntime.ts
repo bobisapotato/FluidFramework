@@ -3,28 +3,36 @@
  * Licensed under the MIT License.
  */
 
+import { IEventProvider } from "@fluidframework/common-definitions";
 import {
     AttachState,
     ContainerWarning,
-    IAudience,
     IDeltaManager,
     ILoader,
+    ILoaderOptions,
 } from "@fluidframework/container-definitions";
 import {
     IRequest,
     IResponse,
     IFluidObject,
     IFluidRouter,
+    IFluidCodeDetails,
 } from "@fluidframework/core-interfaces";
 import { IDocumentStorageService } from "@fluidframework/driver-definitions";
 import {
     IClientDetails,
     IDocumentMessage,
     IHelpMessage,
-    IQuorum,
+    IPendingProposal,
     ISequencedDocumentMessage,
 } from "@fluidframework/protocol-definitions";
-import { FlushMode, IContainerRuntimeBase, IInboundSignalMessage } from "@fluidframework/runtime-definitions";
+import {
+    FlushMode,
+    IContainerRuntimeBase,
+    IContainerRuntimeBaseEvents,
+    IFluidDataStoreContextDetached,
+    IProvideFluidDataStoreRegistry,
+ } from "@fluidframework/runtime-definitions";
 import { IProvideContainerRuntimeDirtyable } from "./containerRuntimeDirtyable";
 
 declare module "@fluidframework/core-interfaces" {
@@ -38,19 +46,35 @@ export interface IProvideContainerRuntime {
     IContainerRuntime: IContainerRuntime;
 }
 
-/**
+export interface IContainerRuntimeEvents extends IContainerRuntimeBaseEvents{
+    (event: "codeDetailsProposed", listener: (codeDetails: IFluidCodeDetails, proposal: IPendingProposal) => void);
+    (
+        event: "dirtyDocument" | "disconnected" | "dispose" | "savedDocument",
+        listener: () => void);
+    (event: "connected", listener: (clientId: string) => void);
+    (event: "localHelp", listener: (message: IHelpMessage) => void);
+    (
+        event: "fluidDataStoreInstantiated",
+        listener: (dataStorePkgName: string, registryPath: string, createNew: boolean) => void,
+    );
+}
+
+export type IContainerRuntimeBaseWithCombinedEvents =
+    IContainerRuntimeBase &  IEventProvider<IContainerRuntimeEvents>;
+
+/*
  * Represents the runtime of the container. Contains helper functions/state of the container.
  */
 export interface IContainerRuntime extends
     IProvideContainerRuntime,
     Partial<IProvideContainerRuntimeDirtyable>,
-    IContainerRuntimeBase {
+    IProvideFluidDataStoreRegistry,
+    IContainerRuntimeBaseWithCombinedEvents {
     readonly id: string;
     readonly existing: boolean;
-    readonly options: any;
+    readonly options: ILoaderOptions;
     readonly clientId: string | undefined;
     readonly clientDetails: IClientDetails;
-    readonly parentBranch: string | null;
     readonly connected: boolean;
     readonly leader: boolean;
     readonly deltaManager: IDeltaManager<ISequencedDocumentMessage, IDocumentMessage>;
@@ -65,19 +89,6 @@ export interface IContainerRuntime extends
      */
     readonly attachState: AttachState;
 
-    on(event: "batchBegin", listener: (op: ISequencedDocumentMessage) => void): this;
-    on(event: "batchEnd", listener: (error: any, op: ISequencedDocumentMessage) => void): this;
-    on(event: "op", listener: (message: ISequencedDocumentMessage) => void): this;
-    on(event: "signal", listener: (message: IInboundSignalMessage, local: boolean) => void): this;
-    on(
-        event: "dirtyDocument" | "disconnected" | "dispose" | "savedDocument" | "leader" | "notleader",
-        listener: () => void): this;
-    on(event: "connected", listener: (clientId: string) => void): this;
-    on(event: "localHelp", listener: (message: IHelpMessage) => void): this;
-    on(
-        event: "fluidDataStoreInstantiated",
-        listener: (dataStorePkgName: string, registryPath: string, createNew: boolean) => void,
-    ): this;
     /**
      * Returns the runtime of the data store.
      * @param id - Id supplied during creating the data store.
@@ -98,14 +109,12 @@ export interface IContainerRuntime extends
     createRootDataStore(pkg: string | string[], rootDataStoreId: string): Promise<IFluidRouter>;
 
     /**
-     * Returns the current quorum.
+     * Creates detached data store context. Data store initialization is considered compete
+     * only after context.attachRuntime() is called.
+     * @param pkg - package path
+     * @param rootDataStoreId - data store ID (unique name)
      */
-    getQuorum(): IQuorum;
-
-    /**
-     * Returns the current audience.
-     */
-    getAudience(): IAudience;
+    createDetachedRootDataStore(pkg: Readonly<string[]>, rootDataStoreId: string): IFluidDataStoreContextDetached;
 
     /**
      * Used to raise an unrecoverable error on the runtime.

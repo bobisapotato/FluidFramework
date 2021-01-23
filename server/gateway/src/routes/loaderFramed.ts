@@ -5,7 +5,7 @@
 
 import { parse } from "url";
 import _ from "lodash";
-import { IFluidCodeDetails } from "@fluidframework/container-definitions";
+import { IFluidCodeDetails } from "@fluidframework/core-interfaces";
 import { ScopeType } from "@fluidframework/protocol-definitions";
 import { IAlfredTenant } from "@fluidframework/server-services-client";
 import { extractPackageIdentifierDetails, SemVerCdnCodeResolver } from "@fluidframework/web-code-loader";
@@ -16,10 +16,13 @@ import { Provider } from "nconf";
 import { v4 } from "uuid";
 import winston from "winston";
 import dotenv from "dotenv";
+import { IFluidResolvedUrl } from "@fluidframework/driver-definitions";
 import { spoEnsureLoggedIn } from "../gatewayOdspUtils";
-import { resolveUrl } from "../gatewayUrlResolver";
+import { FullTree, resolveR11sUrl, resolveSpoUrl } from "../gatewayUrlResolver";
 import { IAlfred, IKeyValueWrapper } from "../interfaces";
-import { getConfig, getUserDetails, queryParamAsString } from "../utils";
+import { isSpoTenant } from "../odspUtils";
+import { getConfig, getUserDetails, queryParamAsString, getR11sToken } from "../utils";
+import { getUser, IExtendedUser } from "./utils";
 
 dotenv.config();
 
@@ -64,7 +67,7 @@ export function create(
                 winston.info(`Redirecting to ${redirectUrl}`);
                 response.redirect(redirectUrl);
             } else {
-                const jwtToken = jwt.sign(
+                const hostToken = jwt.sign(
                     {
                         user: request.user,
                     },
@@ -79,8 +82,20 @@ export function create(
 
                 const search = parse(request.url).search;
                 const scopes = [ScopeType.DocRead, ScopeType.DocWrite, ScopeType.SummaryWrite];
-                const [resolvedP, fullTreeP] =
-                    resolveUrl(config, alfred, appTenants, tenantId, documentId, scopes, request);
+                const user = getUser(request);
+                const isSpoTenantPath = isSpoTenant(tenantId);
+                let fullTreeP: Promise<undefined | FullTree>;
+                let resolvedP: Promise<IFluidResolvedUrl>;
+                let r11sAccessToken = "";
+                if (isSpoTenantPath) {
+                    [resolvedP, fullTreeP] =
+                        resolveSpoUrl(config, tenantId, documentId, request);
+                } else {
+                    r11sAccessToken = getR11sToken(
+                        tenantId, documentId, appTenants, scopes, user as IExtendedUser);
+                    [resolvedP, fullTreeP] =
+                        resolveR11sUrl(config, alfred, tenantId, documentId, r11sAccessToken, request);
+                }
 
                 const workerConfig = getConfig(
                     config.get("worker"),
@@ -139,7 +154,6 @@ export function create(
 
                     const umd = pkg?.resolvedPackage?.fluid?.browser?.umd;
                     // TODO: possible bug?
-                    // eslint-disable-next-line @typescript-eslint/strict-boolean-expressions
                     if (!umd) {
                         return [];
                     }
@@ -180,7 +194,9 @@ export function create(
                                 clientId: _.isEmpty(configClientId)
                                     ? process.env.MICROSOFT_CONFIGURATION_CLIENT_ID : configClientId,
                                 config: workerConfig,
-                                jwt: jwtToken,
+                                isSpoTenantPath,
+                                hostToken,
+                                accessToken: r11sAccessToken,
                                 npm: config.get("worker:npm"),
                                 partials: {
                                     layoutFramed: "layoutFramed",

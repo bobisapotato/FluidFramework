@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-import { strict as assert } from "assert";
+import { assert } from "@fluidframework/common-utils";
 import { UnassignedSequenceNumber } from "./constants";
 import { CollaborationWindow, ISegment } from "./mergeTree";
 import { ICombiningOp, IMergeTreeAnnotateMsg } from "./ops";
@@ -36,7 +36,7 @@ export class SegmentPropertiesManager {
         newProps: Properties.PropertySet,
         op?: ICombiningOp,
         seq?: number,
-        collabWindow?: CollaborationWindow): Properties.PropertySet {
+        collabWindow?: CollaborationWindow): Properties.PropertySet | undefined {
         if (!this.segment.properties) {
             this.pendingRewriteCount = 0;
             this.segment.properties = Properties.createMap<any>();

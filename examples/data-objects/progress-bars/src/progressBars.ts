@@ -4,6 +4,7 @@
  */
 
 import { EventEmitter } from "events";
+import { defaultFluidObjectRequestHandler } from "@fluidframework/aqueduct";
 import {
     IFluidObject,
     IFluidHandleContext,
@@ -12,15 +13,15 @@ import {
     IRequest,
     IResponse,
 } from "@fluidframework/core-interfaces";
-import { FluidObjectHandle, FluidDataStoreRuntime } from "@fluidframework/datastore";
+import { FluidObjectHandle, mixinRequestHandler } from "@fluidframework/datastore";
 import { IFluidObjectCollection } from "@fluid-example/fluid-object-interfaces";
 import { ISharedMap, SharedMap } from "@fluidframework/map";
 import { IFluidDataStoreRuntime, IChannelFactory } from "@fluidframework/datastore-definitions";
 import { IFluidDataStoreContext, IFluidDataStoreFactory } from "@fluidframework/runtime-definitions";
 import { IFluidHTMLView } from "@fluidframework/view-interfaces";
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports,import/no-internal-modules,import/no-unassigned-import
-require("bootstrap/dist/css/bootstrap.min.css");
+// eslint-disable-next-line import/no-internal-modules,import/no-unassigned-import
+import "bootstrap/dist/css/bootstrap.min.css";
 
 class ProgressBarView implements IFluidHTMLView {
     public parent: HTMLElement;
@@ -111,11 +112,7 @@ export class ProgressBar extends EventEmitter implements
     }
 
     public async request(request: IRequest): Promise<IResponse> {
-        return {
-            mimeType: "fluid/object",
-            status: 200,
-            value: this,
-        };
+        return defaultFluidObjectRequestHandler(this, request);
     }
 }
 
@@ -230,16 +227,14 @@ class ProgressBarsFactory implements IFluidDataStoreFactory {
         const mapFactory = SharedMap.getFactory();
         dataTypes.set(mapFactory.type, mapFactory);
 
-        const runtime = FluidDataStoreRuntime.load(
-            context,
-            dataTypes,
-        );
+        const runtimeClass = mixinRequestHandler(
+            async (request: IRequest) => {
+                const router = await routerP;
+                return router.request(request);
+            });
 
-        const progressCollectionP = ProgressCollection.load(runtime, context);
-        runtime.registerRequestHandler(async (request: IRequest) => {
-            const progressCollection = await progressCollectionP;
-            return progressCollection.request(request);
-        });
+        const runtime = new runtimeClass(context, dataTypes);
+        const routerP = ProgressCollection.load(runtime, context);
 
         return runtime;
     }
