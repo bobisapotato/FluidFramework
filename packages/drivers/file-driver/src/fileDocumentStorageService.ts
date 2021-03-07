@@ -4,8 +4,12 @@
  */
 
 import fs from "fs";
-import { assert, fromBase64ToUtf8, stringToBuffer } from "@fluidframework/common-utils";
-import { IDocumentStorageService } from "@fluidframework/driver-definitions";
+import { assert, bufferToString, stringToBuffer } from "@fluidframework/common-utils";
+import {
+    IDocumentStorageService,
+    IDocumentStorageServicePolicies,
+    ISummaryContext,
+} from "@fluidframework/driver-definitions";
 import { buildSnapshotTree } from "@fluidframework/driver-utils";
 import * as api from "@fluidframework/protocol-definitions";
 import { IFileSnapshot, ReadDocumentStorageServiceBase } from "@fluidframework/replay-driver";
@@ -48,9 +52,9 @@ export class FluidFetchReader extends ReadDocumentStorageServiceBase implements 
                 return null;
             }
             rootTree = true;
-            filename = `${this.path}/${this.versionName}/tree.json`;
+            filename = `${this.path}/${this.versionName}/decoded/tree.json`;
         } else {
-            filename = `${this.path}/${this.versionName}/${version.id}.json`;
+            filename = `${this.path}/${this.versionName}/decoded/${version.id}.json`;
         }
 
         if (!fs.existsSync(filename)) {
@@ -123,8 +127,8 @@ export interface ISnapshotWriterStorage extends IDocumentStorageService {
 }
 
 export type ReaderConstructor = new (...args: any[]) => IDocumentStorageService;
-export function FileSnapshotWriterClassFactory<TBase extends ReaderConstructor>(Base: TBase) {
-    return class extends Base implements ISnapshotWriterStorage {
+export const FileSnapshotWriterClassFactory = <TBase extends ReaderConstructor>(Base: TBase) =>
+    class extends Base implements ISnapshotWriterStorage {
         // Note: if variable name has same name as in base class, it overrides it!
         public blobsWriter = new Map<string, string>();
         public commitsWriter: { [key: string]: api.ITree } = {};
@@ -218,7 +222,7 @@ export function FileSnapshotWriterClassFactory<TBase extends ReaderConstructor>(
 
             // Remove tree IDs for easier comparison of snapshots
             delete tree.id;
-            removeNullTreIds(tree);
+            removeNullTreeIds(tree);
 
             if (ref) {
                 this.commitsWriter[commitName] = tree;
@@ -303,9 +307,10 @@ export function FileSnapshotWriterClassFactory<TBase extends ReaderConstructor>(
             }
 
             for (const blobName of Object.keys(snapshotTree.blobs)) {
-                const contents = await this.read(snapshotTree.blobs[blobName]);
+                const buffer = await this.readBlob(snapshotTree.blobs[blobName]);
+                const contents = bufferToString(buffer, "utf8");
                 const blob: api.IBlob = {
-                    contents: fromBase64ToUtf8(contents), // Decode for readability
+                    contents,
                     encoding: "utf-8",
                 };
                 tree.entries.push({
@@ -320,12 +325,11 @@ export function FileSnapshotWriterClassFactory<TBase extends ReaderConstructor>(
             return tree;
         }
     };
-}
 
-function removeNullTreIds(tree: api.ITree) {
+function removeNullTreeIds(tree: api.ITree) {
     for (const node of tree.entries) {
         if (node.type === api.TreeEntry.Tree) {
-            removeNullTreIds(node.value);
+            removeNullTreeIds(node.value);
         }
     }
     assert(tree.id === undefined || tree.id === null);

@@ -10,8 +10,8 @@ import { AsyncQueue, queue } from "async";
  * A sequenced lambda processes incoming messages one at a time based on a promise returned by the message handler.
  */
 export abstract class SequencedLambda implements IPartitionLambda {
-    protected tenantId: string;
-    protected documentId: string;
+    protected tenantId: string | undefined;
+    protected documentId: string | undefined;
 
     private readonly q: AsyncQueue<IQueuedMessage>;
 
@@ -27,12 +27,11 @@ export abstract class SequencedLambda implements IPartitionLambda {
         }, 1);
 
         this.q.error = (error) => {
-            const documentError = {
-                documentId: this.documentId,
-                error,
+            context.error(error, {
+                restart: true,
                 tenantId: this.tenantId,
-            };
-            context.error(documentError, true);
+                documentId: this.documentId,
+            });
         };
     }
 

@@ -93,6 +93,7 @@ export interface IContainerEvents extends IEvent {
     (event: "closed", listener: (error?: ICriticalContainerError) => void);
     (event: "warning", listener: (error: ContainerWarning) => void);
     (event: "op", listener: (message: ISequencedDocumentMessage) => void);
+    (event: "dirty" | "saved", listener: (dirty: boolean) => void);
 }
 
 /**
@@ -130,6 +131,13 @@ export interface IContainer extends IEventProvider<IContainerEvents>, IFluidRout
      * Returns true if the container has been closed, otherwise false
      */
     readonly closed: boolean;
+
+    /**
+     * Returns true if the container is dirty, i.e. there are user changes that has not been saved
+     * Closing container in this state results in data loss for user.
+     * Container usually gets into this situation due to loss of connectivity.
+     */
+    readonly isDirty: boolean;
 
     /**
      * Closes the container
@@ -173,7 +181,7 @@ export interface IContainer extends IEventProvider<IContainerEvents>, IFluidRout
 }
 
 /**
- * The Host's view of the Loader, used for loading Containers
+ * The Runtime's view of the Loader, used for loading Containers
  */
 export interface ILoader extends IFluidRouter {
     /**
@@ -184,7 +192,12 @@ export interface ILoader extends IFluidRouter {
      * a request against the server found from the resolve step.
      */
     resolve(request: IRequest): Promise<IContainer>;
+}
 
+/**
+ * The Host's view of the Loader, used for loading Containers
+ */
+export interface IHostLoader extends ILoader {
     /**
      * Creates a new container using the specified chaincode but in an unattached state. While unattached all
      * updates will only be local until the user explicitly attaches the container to a service provider.
@@ -209,6 +222,16 @@ export type ILoaderOptions = {
      * Defaults to false.
      */
     hotSwapContext?: boolean;
+
+    /**
+     * Set caching behavior for the loader.  If true, we will load a container from cache if one
+     * with the same id/version exists or create a new container and cache it if it does not. If
+     * false, always load a new container and don't cache it. If the container has already been
+     * closed, it will not be cached.  A cache option in the LoaderHeader for an individual
+     * request will override the Loader's value.
+     * Defaults to true.
+     */
+    cache?: boolean;
 };
 
 /**
@@ -216,15 +239,11 @@ export type ILoaderOptions = {
  */
 export enum LoaderHeader {
     /**
-     * Use cache for this container. If true, we will load a container from cache if one with the same id/version exists
-     * or create a new container and cache it if it does not. If false, always load a new container and don't cache it.
-     * Currently only used to opt-out of caching, as it will default to true but will be false (even if specified as
-     * true) if the reconnect header is false or the pause header is true, since these containers should not be cached.
+     * Override the Loader's default caching behavior for this container.
      */
     cache = "fluid-cache",
 
     clientDetails = "fluid-client-details",
-    executionContext = "execution-context",
 
     /**
      * Start the container in a paused, unconnected state. Defaults to false
@@ -249,7 +268,6 @@ export interface ILoaderHeader {
     [LoaderHeader.cache]: boolean;
     [LoaderHeader.clientDetails]: IClientDetails;
     [LoaderHeader.pause]: boolean;
-    [LoaderHeader.executionContext]: string;
     [LoaderHeader.sequenceNumber]: number;
     [LoaderHeader.reconnect]: boolean;
     [LoaderHeader.version]: string | undefined | null;

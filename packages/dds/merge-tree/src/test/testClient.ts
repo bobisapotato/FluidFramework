@@ -7,9 +7,7 @@ import { strict as assert } from "assert";
 import { DebugLogger } from "@fluidframework/telemetry-utils";
 import { ISequencedDocumentMessage, ITree, MessageType } from "@fluidframework/protocol-definitions";
 import { IFluidDataStoreRuntime } from "@fluidframework/datastore-definitions";
-// eslint-disable-next-line import/no-extraneous-dependencies
 import { MockStorage } from "@fluidframework/test-runtime-utils";
-// eslint-disable-next-line import/no-extraneous-dependencies
 import random from "random-js";
 import { Client } from "../client";
 import * as Collections from "../collections";
@@ -52,7 +50,8 @@ export class TestClient extends Client {
     public static async createFromClientSnapshot(client1: TestClient, newLongClientId: string): Promise<TestClient> {
         const snapshot = new SnapshotLegacy(client1.mergeTree, DebugLogger.create("fluid:snapshot"));
         snapshot.extractSync();
-        const snapshotTree = snapshot.emit([], TestClient.serializer);
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        const snapshotTree = snapshot.emit([], TestClient.serializer, undefined!);
         return TestClient.createFromSnapshot(snapshotTree, newLongClientId, client1.specToSegment);
     }
 

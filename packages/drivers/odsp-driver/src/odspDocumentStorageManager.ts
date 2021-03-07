@@ -12,18 +12,19 @@ import {
     fromUtf8ToBase64,
     IsoBuffer,
     performance,
+    stringToBuffer,
 } from "@fluidframework/common-utils";
 import {
     PerformanceEvent,
-    TelemetryLogger,
 } from "@fluidframework/telemetry-utils";
 import * as api from "@fluidframework/protocol-definitions";
 import {
     ISummaryContext,
     IDocumentStorageService,
     DriverErrorType,
+    LoaderCachingPolicy,
 } from "@fluidframework/driver-definitions";
-import { OdspErrorType } from "@fluidframework/odsp-doclib-utils";
+import { OdspErrorType, throwOdspNetworkError } from "@fluidframework/odsp-doclib-utils";
 import {
     IDocumentStorageGetVersionsResponse,
     IOdspResolvedUrl,
@@ -45,9 +46,8 @@ import {
     persistedCacheValueVersion,
 } from "./odspCache";
 import { getWithRetryForTokenRefresh, IOdspResponse } from "./odspUtils";
-import { throwOdspNetworkError } from "./odspError";
 import { TokenFetchOptions } from "./tokenFetch";
-import { EpochTracker, FetchType } from "./epochTracker";
+import { EpochTracker } from "./epochTracker";
 import { OdspSummaryUploadManager } from "./odspSummaryUploadManager";
 
 /* eslint-disable max-len */
@@ -99,16 +99,126 @@ async function promiseRaceWithWinner<T>(promises: Promise<T>[]): Promise<{ index
     });
 }
 
-export class OdspDocumentStorageService implements IDocumentStorageService {
-    private readonly blobCache: Map<string, IBlob | ArrayBuffer> = new Map();
-    private readonly treesCache: Map<string, ITree> = new Map();
-
+class BlobCache {
     // Save the timeout so we can cancel and reschedule it as needed
-    // private blobCacheTimeout: ReturnType<typeof setTimeout> | undefined;
+    private blobCacheTimeout: ReturnType<typeof setTimeout> | undefined;
     // If the defer flag is set when the timeout fires, we'll reschedule rather than clear immediately
     // This deferral approach is used (rather than clearing/resetting the timer) as current calling patterns trigger
     // too many calls to setTimeout/clearTimeout.
-    // private deferBlobCacheClear: boolean = false;
+    private deferBlobCacheClear: boolean = false;
+
+    private readonly _blobCache: Map<string, IBlob | ArrayBuffer> = new Map();
+
+    // Tracks all blob IDs evicted from cache
+    private readonly blobsEvicted: Set<string> = new Set();
+
+    // Initial time-out to purge data from cache
+    // If this time out is very small, then we purge blobs from cache too soon and that results in a lot of
+    // requests to storage, which brings down perf and may trip protection limits causing 429s
+    // Also we need to ensure that buildCachesForDedup() is called with full cache for summarizer client to build
+    // its SHA cache for blobs (currently that happens as result of requesting snapshot tree)
+    private blobCacheTimeoutDuration = 2 * 60 * 1000;
+
+    // SPO does not keep old snapshots around for long, so we are running chances of not
+    // being able to rehydrate data store / DDS in the future if we purge anything (and with blob de-duping,
+    // even if blob read by runtime, it could be read again in the future)
+    // So for now, purging is disabled.
+    private readonly purgeEnabled = false;
+
+    public get value() {
+        return this._blobCache;
+    }
+
+    public addBlobs(blobs: IBlob[]) {
+        blobs.forEach((blob) => {
+            assert(blob.encoding === "base64" || blob.encoding === undefined);
+            this._blobCache.set(blob.id, blob);
+        });
+        // Reset the timer on cache set
+        this.scheduleClearBlobsCache();
+    }
+
+    /**
+     * Schedule a timer for clearing the blob cache or defer the current one.
+     */
+    private scheduleClearBlobsCache() {
+        if (this.blobCacheTimeout !== undefined) {
+            // If we already have an outstanding timer, just signal that we should defer the clear
+            this.deferBlobCacheClear = true;
+        } else {
+            // If we don't have an outstanding timer, set a timer
+            // When the timer runs out, we'll decide whether to proceed with the cache clear or reset the timer
+            const clearCacheOrDefer = () => {
+                this.blobCacheTimeout = undefined;
+                if (this.deferBlobCacheClear) {
+                    this.deferBlobCacheClear = false;
+                    this.scheduleClearBlobsCache();
+                } else {
+                    // NOTE: Slightly better algorithm here would be to purge either only big blobs,
+                    // or sort them by size and purge enough big blobs to leave only 256Kb of small blobs in cache
+                    // Purging is optimizing memory footprint. But count controls potential number of storage requests
+                    // We want to optimize both - memory footprint and number of future requests to storage.
+                    // Note that Container can realize data store or DDS on-demand at any point in time, so we do not
+                    // control when blobs will be used.
+                    if (this.purgeEnabled) {
+                        this._blobCache.forEach((_, blobId) => this.blobsEvicted.add(blobId));
+                        this._blobCache.clear();
+                    }
+                }
+            };
+            this.blobCacheTimeout = setTimeout(clearCacheOrDefer, this.blobCacheTimeoutDuration);
+            // any future storage reads that get into the cache should be cleared from cache rather quickly -
+            // there is not much value in keeping them longer
+            this.blobCacheTimeoutDuration = 10 * 1000;
+        }
+    }
+
+    public getBlob(blobId: string) {
+        // Reset the timer on attempted cache read
+        this.scheduleClearBlobsCache();
+        const blobContent = this._blobCache.get(blobId);
+        const evicted = this.blobsEvicted.has(blobId);
+        return { blobContent, evicted };
+    }
+
+    public setBlob(blobId: string, blob: IBlob | ArrayBuffer) {
+        // This API is called as result of cache miss and reading blob from storage.
+        // Runtime never reads same blob twice.
+        // The only reason we may get read request for same blob is blob de-duping in summaries.
+        // Note that the bigger the size, the less likely blobs are the same, so there is very little benefit of caching big blobs.
+        // Images are the only exception - user may insert same image twice. But we currently do not de-dup them - only snapshot
+        // blobs are de-duped.
+        const size = blob instanceof ArrayBuffer ? blob.byteLength : blob.size;
+        if (size < 256 * 1024) {
+            // Reset the timer on cache set
+            this.scheduleClearBlobsCache();
+            return this._blobCache.set(blobId, blob);
+        } else {
+            // we evicted it here by not caching.
+            this.blobsEvicted.add(blobId);
+        }
+    }
+}
+
+export class OdspDocumentStorageService implements IDocumentStorageService {
+    readonly policies = {
+        // By default, ODSP tells the container not to prefetch/cache.
+        caching: LoaderCachingPolicy.NoCaching,
+
+        // ODSP storage works better if it has less number of blobs / edges
+        // Runtime creating many small blobs results in sub-optimal perf.
+        // 2K seems like the sweat spot:
+        // The smaller the number, less blobs we aggregate. Most storages are very likely to have notion
+        // of minimal "cluster" size, so having small blobs is wasteful
+        // At the same time increasing the limit ensure that more blobs with user content are aggregated,
+        // reducing possibility for de-duping of same blobs (i.e. .attributes rolled into aggregate blob
+        // are not reused across data stores, or even within data store, resulting in duplication of content)
+        // Note that duplication of content should not have significant impact for bytes over wire as
+        // compression of http payload mostly takes care of it, but it does impact storage size and in-memory sizes.
+        minBlobSize: 2048,
+    };
+
+    private readonly treesCache: Map<string, ITree> = new Map();
 
     private readonly attributesBlobHandles: Set<string> = new Set();
 
@@ -133,6 +243,8 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
      */
     private readonly maxSnapshotSizeLimit = 500000000; // 500 MB
     private readonly maxSnapshotFetchTimeout = 120000; // 2 min
+
+    private readonly blobCache = new BlobCache();
 
     public set ops(ops: ISequencedDeltaOpMessage[] | undefined) {
         assert(this._ops === undefined);
@@ -168,7 +280,7 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
             docId: this.documentId,
         };
 
-        this.odspSummaryUploadManager = new OdspSummaryUploadManager(this.snapshotUrl, getStorageToken, logger, epochTracker, this.blobCache);
+        this.odspSummaryUploadManager = new OdspSummaryUploadManager(this.snapshotUrl, getStorageToken, logger, epochTracker);
     }
 
     public get repositoryUrl(): string {
@@ -197,9 +309,12 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
                             headers,
                             method: "POST",
                         },
-                        FetchType.createBlob,
+                        "createBlob",
                     );
-                    event.end({ blobId: res.content.id });
+                    event.end({
+                        blobId: res.content.id,
+                        ...res.commonSpoHeaders,
+                    });
                     return res;
                 },
             );
@@ -208,10 +323,9 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
         return response.content;
     }
 
-    public async readBlobCore(blobId: string): Promise<IBlob | ArrayBuffer> {
-        let blob = this.blobCache.get(blobId);
-        // Reset the timer on attempted cache read
-        this.scheduleClearBlobsCache();
+    private async readBlobCore(blobId: string): Promise<IBlob | ArrayBuffer> {
+        const { blobContent, evicted } = this.blobCache.getBlob(blobId);
+        let blob = blobContent;
 
         if (blob === undefined) {
             this.checkAttachmentGETUrl();
@@ -226,21 +340,31 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
                     {
                         eventName: "readDataBlob",
                         blobId,
+                        evicted,
                         headers: Object.keys(headers).length !== 0 ? true : undefined,
                         waitQueueLength: this.epochTracker.rateLimiter.waitQueueLength,
                     },
                     async (event) => {
-                        const res = await this.epochTracker.fetchResponse(url, { headers }, FetchType.blob);
-                        const blobContent = await res.arrayBuffer();
+                        const res = await this.epochTracker.fetchArray(url, { headers }, "blob");
                         event.end({
-                            size: blobContent.byteLength,
                             waitQueueLength: this.epochTracker.rateLimiter.waitQueueLength,
+                            ...res.commonSpoHeaders,
+                            attempts: options.refresh ? 2 : 1,
                         });
-                        return blobContent;
+                        const cacheControl = res.headers.get("cache-control");
+                        if (cacheControl === undefined || !(cacheControl.includes("private") || cacheControl.includes("public"))) {
+                            this.logger.sendErrorEvent({
+                                eventName: "NonCacheableBlob",
+                                cacheControl,
+                                blobId,
+                                ...res.commonSpoHeaders,
+                            });
+                        }
+                        return res.content;
                     },
                 );
             });
-            this.blobCache.set(blobId, blob);
+            this.blobCache.setBlob(blobId, blob);
         }
 
         if (!this.attributesBlobHandles.has(blobId)) {
@@ -265,10 +389,6 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
             size: content.length,
             encoding: undefined, // string
         };
-        this.blobCache.set(blobId, blobPatched);
-
-        // No need to patch it again
-        this.attributesBlobHandles.delete(blobId);
 
         return blobPatched;
     }
@@ -278,7 +398,7 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
         if (blob instanceof ArrayBuffer) {
             return blob;
         }
-        return IsoBuffer.from(blob.content, blob.encoding ?? "utf-8");
+        return stringToBuffer(blob.content, blob.encoding ?? "utf8");
     }
 
     public async read(blobId: string): Promise<string> {
@@ -357,7 +477,7 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
         }
 
         if (this.hostPolicy.summarizerClient) {
-            await this.odspSummaryUploadManager.buildCachesForDedup(finalTree);
+            await this.odspSummaryUploadManager.buildCachesForDedup(finalTree, this.blobCache.value);
         }
         return finalTree;
     }
@@ -391,7 +511,11 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
                 if (tokenFetchOptions.refresh) {
                     // This is the most critical code path for boot.
                     // If we get incorrect / expired token first time, that adds up to latency of boot
-                    this.logger.sendErrorEvent({ eventName: "TreeLatest_SecondCall", hasClaims: !!tokenFetchOptions.claims });
+                    this.logger.sendErrorEvent({
+                        eventName: "TreeLatest_SecondCall",
+                        hasClaims: !!tokenFetchOptions.claims,
+                        hasTenantId: !!tokenFetchOptions.tenantId,
+                    });
                 }
 
                 const hostSnapshotOptions = this.hostPolicy.snapshotOptions;
@@ -411,7 +535,7 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
                                     key: "",
                                 },
                                 this.hostPolicy.summarizerClient ? snapshotExpirySummarizerOps : undefined,
-                                FetchType.treesLatest,
+                                "treesLatest",
                             );
 
                             let method: string;
@@ -483,7 +607,7 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
                     eventName: "getVersions",
                     headers: Object.keys(headers).length !== 0 ? true : undefined,
                 },
-                async () => this.epochTracker.fetchAndParseAsJSON<IDocumentStorageGetVersionsResponse>(url, { headers }, FetchType.treesLatest),
+                async () => this.epochTracker.fetchAndParseAsJSON<IDocumentStorageGetVersionsResponse>(url, { headers }, "versions"),
             );
             const versionsResponse = response.content;
             if (!versionsResponse) {
@@ -585,7 +709,7 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
         };
 
         // This event measures only successful cases of getLatest call (no tokens, no retries).
-        const { snapshot, canCache } = await PerformanceEvent.timedExecAsync(this.logger, { eventName: "TreesLatest", fetchTimeout: snapshotOptions.timeout, maxSnapshotSize: snapshotOptions.mds }, async (event) => {
+        const odspSnapshot = await PerformanceEvent.timedExecAsync(this.logger, { eventName: "TreesLatest", fetchTimeout: snapshotOptions.timeout, maxSnapshotSize: snapshotOptions.mds }, async (event) => {
             const startTime = performance.now();
             const response: IOdspResponse<IOdspSnapshot> = await this.epochTracker.fetchAndParseAsJSON<IOdspSnapshot>(
                 url,
@@ -595,12 +719,12 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
                     signal: controller?.signal,
                     method: "POST",
                 },
-                FetchType.treesLatest,
+                "treesLatest",
                 true,
             );
             const endTime = performance.now();
             const overallTime = endTime - startTime;
-            const content = response.content;
+            const snapshot: IOdspSnapshot = response.content;
             let dnstime: number | undefined; // domainLookupEnd - domainLookupStart
             let redirectTime: number | undefined; // redirectEnd -redirectStart
             let tcpHandshakeTime: number | undefined; // connectEnd  - connectStart
@@ -610,7 +734,6 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
             let reqStToRespEndTime: number | undefined; // responseEnd - requestStart
             let networkTime: number | undefined; // responseEnd - startTime
             const spReqDuration = response.headers.get("sprequestduration");
-            const msEdge = response.headers.get("x-msedge-ref"); // To track Azure Front Door information of which the request came in at
 
             // getEntriesByType is only available in browser performance object
             const resources1 = performance.getEntriesByType?.("resource") ?? [];
@@ -635,16 +758,48 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
                 }
             }
 
+            const { numTrees, numBlobs, encodedBlobsSize, decodedBlobsSize } = this.evalBlobsAndTrees(snapshot);
             const clientTime = networkTime ? overallTime - networkTime : undefined;
-            const isAfd = msEdge !== undefined;
+
+            assert(this._snapshotCacheEntry === undefined);
+            this._snapshotCacheEntry = {
+                file: this.fileEntry,
+                type: "snapshot",
+                key: "",
+            };
+
+            // There are some scenarios in ODSP where we cannot cache, trees/latest will explicitly tell us when we cannot cache using an HTTP response header.
+            const canCache = response.headers.get("disablebrowsercachingofusercontent") !== "true";
+            // There maybe no snapshot - TreesLatest would return just ops.
+            const seqNumber: number = (snapshot.trees && (snapshot.trees[0] as any).sequenceNumber) ?? 0;
+            const seqNumberFromOps = snapshot.ops && snapshot.ops.length > 0 ?
+                snapshot.ops[0].sequenceNumber - 1 :
+                undefined;
+
+            if (!Number.isInteger(seqNumber) || seqNumberFromOps !== undefined && seqNumberFromOps !== seqNumber) {
+                this.logger.sendErrorEvent({ eventName: "fetchSnapshotError", seqNumber, seqNumberFromOps });
+            } else if (canCache) {
+                const cacheValue: IPersistedCacheValueWithEpoch = {
+                    value: snapshot,
+                    fluidEpoch: this.epochTracker.fluidEpoch,
+                    version: persistedCacheValueVersion,
+                };
+                this.cache.persistedCache.put(
+                    this._snapshotCacheEntry,
+                    cacheValue,
+                    seqNumber,
+                );
+            }
 
             event.end({
-                trees: content.trees?.length ?? 0,
-                blobs: content.blobs?.length ?? 0,
-                ops: content.ops?.length ?? 0,
+                trees: numTrees,
+                blobs: snapshot.blobs?.length ?? 0,
+                leafNodes: numBlobs,
+                encodedBlobsSize,
+                decodedBlobsSize,
+                seqNumber,
+                ops: snapshot.ops?.length ?? 0,
                 headers: Object.keys(headers).length !== 0 ? true : undefined,
-                sprequestguid: response.headers.get("sprequestguid"),
-                sprequestduration: TelemetryLogger.numberFromString(response.headers.get("sprequestduration")),
                 redirecttime: redirectTime,
                 dnsLookuptime: dnstime,
                 responsenetworkTime: responseTime,
@@ -655,47 +810,34 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
                 overalltime: overallTime,
                 networktime: networkTime,
                 clienttime: clientTime,
-                msedge: msEdge,
-                isafd: isAfd,
-                contentsize: TelemetryLogger.numberFromString(response.headers.get("content-length")),
-                bodysize: TelemetryLogger.numberFromString(response.headers.get("body-size")),
+                ...response.commonSpoHeaders,
             });
-            return {
-                snapshot: content,
-                // There are some scenarios in ODSP where we cannot cache, trees/latest will explicitly tell us when we cannot cache using an HTTP response header.
-                canCache: response.headers.get("disablebrowsercachingofusercontent") !== "true",
-            };
+            return snapshot;
         });
+        return odspSnapshot;
+    }
 
-        assert(this._snapshotCacheEntry === undefined);
-        this._snapshotCacheEntry = {
-            file: this.fileEntry,
-            type: "snapshot",
-            key: "",
-        };
-
-        // There maybe no snapshot - TreesLatest would return just ops.
-        const seqNumber: number = (snapshot.trees && (snapshot.trees[0] as any).sequenceNumber) ?? 0;
-        const seqNumberFromOps = snapshot.ops && snapshot.ops.length > 0 ?
-            snapshot.ops[0].sequenceNumber - 1 :
-            undefined;
-
-        if (!Number.isInteger(seqNumber) || seqNumberFromOps !== undefined && seqNumberFromOps !== seqNumber) {
-            this.logger.sendErrorEvent({ eventName: "fetchSnapshotError", seqNumber, seqNumberFromOps });
-        } else if (canCache) {
-            const cacheValue: IPersistedCacheValueWithEpoch = {
-                value: snapshot,
-                fluidEpoch: this.epochTracker.fluidEpoch,
-                version: persistedCacheValueVersion,
-            };
-            this.cache.persistedCache.put(
-                this._snapshotCacheEntry,
-                cacheValue,
-                seqNumber,
-            );
+    private evalBlobsAndTrees(snapshot: IOdspSnapshot) {
+        let numTrees = 0;
+        let numBlobs = 0;
+        let encodedBlobsSize = 0;
+        let decodedBlobsSize = 0;
+        for (const tree of snapshot.trees) {
+            for(const treeEntry of tree.entries) {
+                if (treeEntry.type === "blob") {
+                    numBlobs++;
+                } else if (treeEntry.type === "tree") {
+                    numTrees++;
+                }
+            }
         }
-
-        return snapshot;
+        if (snapshot.blobs !== undefined) {
+            for (const blob of snapshot.blobs) {
+                decodedBlobsSize += blob.size;
+                encodedBlobsSize += blob.content.length;
+            }
+        }
+        return { numTrees, numBlobs, encodedBlobsSize, decodedBlobsSize };
     }
 
     public async write(tree: api.ITree, parents: string[], message: string): Promise<api.IVersion> {
@@ -724,37 +866,7 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
     }
 
     private initBlobsCache(blobs: IBlob[]) {
-        blobs.forEach((blob) => {
-            assert(blob.encoding === "base64" || blob.encoding === undefined);
-            this.blobCache.set(blob.id, blob);
-        });
-        this.scheduleClearBlobsCache();
-    }
-
-    /**
-     * Schedule a timer for clearing the blob cache or defer the current one.
-     */
-    private scheduleClearBlobsCache() {
-        /*
-        if (this.blobCacheTimeout !== undefined) {
-            // If we already have an outstanding timer, just signal that we should defer the clear
-            this.deferBlobCacheClear = true;
-        } else {
-            // If we don't have an outstanding timer, set a timer
-            // When the timer runs out, we'll decide whether to proceed with the cache clear or reset the timer
-            const clearCacheOrDefer = () => {
-                this.blobCacheTimeout = undefined;
-                if (this.deferBlobCacheClear) {
-                    this.deferBlobCacheClear = false;
-                    this.scheduleClearBlobsCache();
-                } else {
-                    this.blobCache.clear();
-                }
-            };
-            const blobCacheTimeoutDuration = 10000;
-            this.blobCacheTimeout = setTimeout(clearCacheOrDefer, blobCacheTimeoutDuration);
-        }
-        */
+        this.blobCache.addBlobs(blobs);
     }
 
     private checkSnapshotUrl() {

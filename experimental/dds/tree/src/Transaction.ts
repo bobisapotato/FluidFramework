@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-import { assert, fail } from './Common';
+import { assert, copyPropertyIfDefined, fail } from './Common';
 import { DetachedSequenceId, NodeId, TraitLabel } from './Identifiers';
 import {
 	EditResult,
@@ -254,6 +254,8 @@ export class Transaction {
 		const node = this.view.getSnapshotNode(change.nodeToModify);
 		const { payload } = change;
 		const newNode = { ...node };
+		// Rationale: 'undefined' is reserved for future use (see 'SetPayload' interface defn.)
+		// eslint-disable-next-line no-null/no-null
 		if (payload === null) {
 			delete newNode.payload;
 		} else {
@@ -282,10 +284,10 @@ export class Transaction {
 
 		const newNode: SnapshotNode = {
 			identifier: node.identifier,
-			...(node.payload ? { payload: node.payload } : {}),
 			definition: node.definition,
 			traits,
 		};
+		copyPropertyIfDefined(node, newNode, 'payload');
 
 		map.set(newNode.identifier, newNode);
 		return newNode.identifier;

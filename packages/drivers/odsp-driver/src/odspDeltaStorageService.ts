@@ -7,7 +7,7 @@ import { ITelemetryLogger } from "@fluidframework/common-definitions";
 import * as api from "@fluidframework/driver-definitions";
 import { ISequencedDocumentMessage } from "@fluidframework/protocol-definitions";
 import { IDeltaStorageGetResponse, ISequencedDeltaOpMessage } from "./contracts";
-import { EpochTracker, FetchType } from "./epochTracker";
+import { EpochTracker } from "./epochTracker";
 import { getUrlAndHeadersWithAuth } from "./getUrlAndHeadersWithAuth";
 import { getWithRetryForTokenRefresh } from "./odspUtils";
 import { TokenFetchOptions } from "./tokenFetch";
@@ -21,18 +21,21 @@ export class OdspDeltaStorageService implements api.IDocumentDeltaStorageService
         private ops: ISequencedDeltaOpMessage[] | undefined,
         private readonly getStorageToken: (options: TokenFetchOptions, name?: string) => Promise<string | null>,
         private readonly epochTracker: EpochTracker,
-        private readonly logger?: ITelemetryLogger,
+        private readonly logger: ITelemetryLogger,
     ) {
     }
 
     public async get(
-        from?: number,
-        to?: number,
-    ): Promise<ISequencedDocumentMessage[]> {
+        from: number,
+        to: number,
+    ): Promise<api.IDeltasFetchResult> {
         const ops = this.ops;
         this.ops = undefined;
-        if (ops !== undefined && from !== undefined) {
-            return ops.filter((op) => op.sequenceNumber > from).map((op) => op.op);
+        if (ops !== undefined) {
+            const messages = ops.filter((op) => op.sequenceNumber > from).map((op) => op.op);
+            if (messages.length > 0) {
+                return { messages, partialResult: true };
+            }
         }
         this.ops = undefined;
 
@@ -46,28 +49,33 @@ export class OdspDeltaStorageService implements api.IDocumentDeltaStorageService
             const { url, headers } = getUrlAndHeadersWithAuth(baseUrl, storageToken);
 
             const response = await this.epochTracker
-                .fetchAndParseAsJSON<IDeltaStorageGetResponse>(url, { headers }, FetchType.ops);
+                .fetchAndParseAsJSON<IDeltaStorageGetResponse>(url, { headers }, "ops");
             const deltaStorageResponse = response.content;
-            if (this.logger) {
-                this.logger.sendTelemetryEvent({
-                    eventName: "DeltaStorageOpsFetch",
-                    headers: Object.keys(headers).length !== 0 ? true : undefined,
-                    sprequestguid: response.headers.get("sprequestguid"),
-                    sprequestduration: response.headers.get("sprequestduration"),
-                });
-            }
-            const operations: ISequencedDocumentMessage[] | ISequencedDeltaOpMessage[] = deltaStorageResponse.value;
-            if (operations.length > 0 && "op" in operations[0]) {
-                return (operations as ISequencedDeltaOpMessage[]).map((operation) => operation.op);
+            let messages: ISequencedDocumentMessage[];
+            if (deltaStorageResponse.value.length > 0 && "op" in deltaStorageResponse.value[0]) {
+                messages = (deltaStorageResponse.value as ISequencedDeltaOpMessage[]).map((operation) => operation.op);
+            } else {
+                messages = deltaStorageResponse.value as ISequencedDocumentMessage[];
             }
 
-            return operations as ISequencedDocumentMessage[];
+            this.logger.sendPerformanceEvent({
+                eventName: "DeltaStorageOpsFetch",
+                headers: Object.keys(headers).length !== 0 ? true : undefined,
+                count: messages.length,
+                duration: response.duration, // this duration for single attempt!
+                ...response.commonSpoHeaders,
+                attempts: options.refresh ? 2 : 1,
+            });
+
+            // It is assumed that server always returns all the ops that it has in the range that was requested.
+            // This may change in the future, if so, we need to adjust and receive "end" value from server in such case.
+            return { messages, partialResult: false };
         });
     }
 
-    public async buildUrl(from: number | undefined, to: number | undefined) {
-        const fromInclusive = from === undefined ? undefined : from + 1;
-        const toInclusive = to === undefined ? undefined : to - 1;
+    public async buildUrl(from: number, to: number) {
+        const fromInclusive = from + 1;
+        const toInclusive = to - 1;
 
         const filter = encodeURIComponent(`sequenceNumber ge ${fromInclusive} and sequenceNumber le ${toInclusive}`);
         const queryString = `?filter=${filter}`;

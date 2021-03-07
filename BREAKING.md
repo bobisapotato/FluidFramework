@@ -1,16 +1,94 @@
+## 0.36 Breaking changes
+- [Some `ILoader` APIs moved to `IHostLoader`](#Some-ILoader-APIs-moved-to-IHostLoader)
+- [TaskManager removed](#TaskManager-removed)
+- [ContainerRuntime registerTasks removed](#ContainerRuntime-registerTasks-removed)
+- [getRootDataStore](#getRootDataStore)
+- [Share link generation no longer exposed externally](#Share-link-generation-no-longer-exposed-externally)
+- [ITelemetryLogger redundant method deprecation](#ITelemetryLogger-redundant-method-deprecation)
+
+### Some `ILoader` APIs moved to `IHostLoader`
+The `createDetachedContainer` and `rehydrateDetachedContainerFromSnapshot` APIs are removed from the `ILoader` interface, and have been moved to the new `IHostLoader` interface.  The `Loader` class now implements `IHostLoader` instead, and consumers who need these methods should operate on an `IHostLoader` instead of an `ILoader`, such as by creating a `Loader`.
+
+### TaskManager removed
+The `TaskManager` has been removed, as well as methods to access it (e.g. the `.taskManager` member on `DataObject`).  The `AgentScheduler` should be used instead for the time being and can be accessed via a request on the `ContainerRuntime` (e.g. `await this.context.containerRuntime.request({ url: "/_scheduler" })`), though we expect this will also be deprecated and removed in a future release when an alternative is made available (see #4413).
+
+### ContainerRuntime registerTasks removed
+The `registerTasks` method has been removed from `ContainerRuntime`.  The `AgentScheduler` should be used instead for task scheduling.
+
+### getRootDataStore
+IContainerRuntime.getRootDataStore() used to have a backdoor allowing accessing any store, including non-root stores. This back door is removed - you can only access root data stores using this API.
+
+### Share link generation no longer exposed externally
+Share link generation implementation has been refactored to remove options for generating share links of various kinds.
+Method for generating share link is no longer exported.
+ShareLinkTokenFetchOptions has been removed and OdspDriverUrlResolverForShareLink constructor has been changed to accept tokenFetcher parameter which will pass OdspResourceTokenFetchOptions instead of ShareLin   kTokenFetchOptions.
+
+### ITelemetryLogger redundant method deprecation
+Deprecate `shipAssert` `debugAssert` `logException` `logGenericError` in favor of `sendErrorEvent` as they provide the same behavior and semantics as `sendErrorEvent`and in general are relatively unused.
+
+## 0.35 Breaking changes
+- [Removed some api implementations from odsp driver](#Removed-some-api-implemenations-from-odsp-driver)
+- [get-tinylicious-container and get-session-storage-container moved](#get-tinylicious-container-and-get-session-storage-container-moved)
+- [Moved parseAuthErrorClaims from @fluidframework/odsp-driver to @fluidframework/odsp-doclib-utils](#Moved-parseAuthErrorClaims-from-@fluidframework/odsp-driver-to-@fluidframework/odsp-doclib-utils)
+- [Refactored token fetcher types in odsp-driver](#refactored-token-fetcher-types-in-odsp-driver)
+- [DeltaManager `readonly` and `readOnlyPermissions` properties deprecated](#DeltaManager-`readonly`-and-`readOnlyPermissions`-properties-deprecated)
+- [DirtyDocument events and property](#DirtyDocument-events-and-property)
+- [Removed `createDocumentService` and `createDocumentService2` from r11s driver](#Removed-`createDocumentService`-and-`createDocumentService2`-from-r11s-driver)
+
+### Removed-some-api-implementations-from-odsp-driver
+Removed `authorizedFetchWithRetry`, `AuthorizedRequestTokenPolicy`, `AuthorizedFetchProps`, `asyncWithCache`, `asyncWithRetry`,
+`fetchWithRetry` implementation from odspdriver.
+
+### get-tinylicious-container and get-session-storage-container moved
+The functionality from the packages `@fluidframework/get-tinylicious-container` and `@fluidframework/get-session-storage-container` has been moved to the package `@fluid-experimental/get-container`.
+
+### Moved parseAuthErrorClaims from @fluidframework/odsp-driver to @fluidframework/odsp-doclib-utils
+Moved `parseAuthErrorClaims` from `@fluidframework/odsp-driver` to `@fluidframework/odsp-doclib-utils`
+
+### Refactored token fetcher types in odsp-driver
+Streamlined interfaces and types used to facilitate access tokens needed by odsp-driver to call ODSP implementation of Fluid services.
+Added support for passing siteUrl when fetching token that is used to establish co-authoring session for Fluid content stored in ODSP file which is hosted in external tenant. This token is used by ODSP ordering service implementation (aka ODSP Push service).
+
+### DeltaManager `readonly` and `readOnlyPermissions` properties deprecated
+`DeltaManager.readonly`/`Container.readonly` and `DeltaManager.readOnlyPermissions`/`Container.readOnlyPermissions` have been deprecated. Please use `DeltaManager.readOnlyInfo`/`Container.readOnlyInfo` instead, which exposes the same information.
+
+### DirtyDocument events and property
+The following 3 names have been deprecated - please use new names:
+"dirtyDocument" event -> "dirty" event
+"savedDocument" event -> "saved" event
+isDocumentDirty property -> isDirty property
+
+### Removed `createDocumentService` and `createDocumentService2` from r11s driver
+Removed the deprecated methods `createDocumentService` and `createDocumentService2`. Please use `DocumentServiceFactory.createDocumentService` instead.
+
+## 0.34 Breaking changes
+- [Aqueduct writeBlob() and BlobHandle implementation removed](#Aqueduct-writeBlob-and-BlobHandle-implementation-removed)
+- [Connected events raised on registration](#Connected-events-raised-on-registration)
+
+### Aqueduct writeBlob() and BlobHandle implementation removed
+`writeBlob()` and `BlobHandle` have been removed from aqueduct. Please use `FluidDataStoreRuntime.uploadBlob()` or `ContainerRuntime.uploadBlob()` instead.
+
+### Connected events raised on registration
+Connected / disconnected listeners are called on registration.
+Please see [Connectivity events](packages/loader/container-loader/README.md#Connectivity-events) section of Loader readme.md for more details
+
 ## 0.33 Breaking changes
 - [Normalizing enum ContainerErrorType](#normalizing-enum-containererrortype)
 - [Map and Directory typing changes from enabling strictNullCheck](#map-and-directory-typing-changes-from-enabling-strictNullCheck)
 - [MergeTree's ReferencePosition.getTileLabels and ReferencePosition.getRangeLabels() return undefined if it doesn't exist](#mergetree-referenceposition-gettilelabels-getrangelabels-changes)
+- [Containers from Loader.request() are now cached by default](#Containers-from-Loader.request()-are-now-cached-by-default)
 
-## Normalizing enum ContainerErrorType
+### Normalizing enum ContainerErrorType
 In an effort to clarify error categorization, a name and value in this enumeration were changed.
 
-## Map and Directory typing changes from enabling strictNullCheck
+### Map and Directory typing changes from enabling strictNullCheck
 Typescript compile options `strictNullCheck` is enabled for the `@fluidframework/map` package. Some of the API signature is updated to include possibility of `undefined` and `null`, which can cause new typescript compile error when upgrading.  Existing code may need to update to handle the possiblity of `undefined` or `null.
 
-## MergeTree ReferencePosition getTileLabels getRangeLabels changes
+### MergeTree ReferencePosition getTileLabels getRangeLabels changes
 This includes LocalReference and Marker.  getTileLabels and getRangeLabels methods will return undefined instead of creating an empty if the properties for tile labels and range labels is not set.
+
+### Containers from Loader.request() are now cached by default
+Some loader request header options that previously prevented caching (`pause: true` and `reconnect: false`) no longer do.  Callers must now explicitly spcify `cache: false` in the request header to prevent caching of the returned container.  Containers are evicted from the cache in their `closed` event, and closed containers that are requested are not cached.
 
 ## 0.32 Breaking changes
 - [Node version 12.17 required](#Node-version-update)

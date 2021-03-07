@@ -5,12 +5,13 @@
 
 import { strict as assert } from "assert";
 import { TelemetryNullLogger } from "@fluidframework/common-utils";
+import { DriverErrorType } from "@fluidframework/driver-definitions";
 import { OdspErrorType } from "@fluidframework/odsp-doclib-utils";
 import { IOdspResolvedUrl } from "../contracts";
-import { EpochTracker, FetchType } from "../epochTracker";
+import { EpochTracker } from "../epochTracker";
 import { ICacheEntry, LocalPersistentCache, LocalPersistentCacheAdapter } from "../odspCache";
 import { getHashedDocumentId } from "../odspUtils";
-import { mockFetch } from "./mockFetch";
+import { mockFetch, mockFetchCore, createResponse } from "./mockFetch";
 
 describe("Tests for Epoch Tracker", () => {
     const siteUrl = "https://microsoft.sharepoint-df.com/siteUrl";
@@ -40,13 +41,9 @@ describe("Tests for Epoch Tracker", () => {
         cache.put(cacheEntry1, { value: "val1", fluidEpoch: "epoch1", version: "0.1" }, 0);
         cache.put(cacheEntry2, { value: "val2", fluidEpoch: "epoch2", version: "0.1" }, 0);
         // This will set the initial epoch value in epoch tracker.
-        await mockFetch({}, async () => {
-            return epochTracker.fetchFromCache(cacheEntry1, undefined, FetchType.other);
-        });
+        await epochTracker.fetchFromCache(cacheEntry1, undefined, "other");
         try {
-            await mockFetch({}, async () => {
-                return epochTracker.fetchFromCache(cacheEntry2, undefined, FetchType.other);
-            });
+            await epochTracker.fetchFromCache(cacheEntry2, undefined, "other");
         } catch (error) {
             success = false;
             assert.strictEqual(error.errorType, OdspErrorType.epochVersionMismatch, "Error should be epoch error");
@@ -65,13 +62,12 @@ describe("Tests for Epoch Tracker", () => {
             file: { docId: hashedDocumentId, resolvedUrl } };
         cache.put(cacheEntry1, { value: "val1", fluidEpoch: "epoch1", version: "0.1" }, 0);
         // This will set the initial epoch value in epoch tracker.
-        await mockFetch({}, async () => {
-            return epochTracker.fetchFromCache(cacheEntry1, undefined, FetchType.other);
-        });
+        await epochTracker.fetchFromCache(cacheEntry1, undefined, "other");
         try {
-            await mockFetch({ headers: { "x-fluid-epoch": "epoch2" } }, async () => {
-                return epochTracker.fetchResponse("fetchUrl", {}, FetchType.other);
-            });
+            await mockFetch(
+                {},
+                async () => epochTracker.fetchArray("fetchUrl", {}, "other"),
+                { "x-fluid-epoch": "epoch2" });
         } catch (error) {
             success = false;
             assert.strictEqual(error.errorType, OdspErrorType.epochVersionMismatch, "Error should be epoch error");
@@ -90,12 +86,13 @@ describe("Tests for Epoch Tracker", () => {
         cache.put(cacheEntry1, { value: "val1", fluidEpoch: "epoch1", version: "0.1" }, 0);
         // This will set the initial epoch value in epoch tracker.
         await mockFetch({}, async () => {
-            return epochTracker.fetchFromCache(cacheEntry1, undefined, FetchType.other);
+            return epochTracker.fetchFromCache(cacheEntry1, undefined, "other");
         });
         try {
-            await mockFetch({ headers: { "x-fluid-epoch": "epoch2" } }, async () => {
-                return epochTracker.fetchAndParseAsJSON("fetchUrl", {}, FetchType.other);
-            });
+            await mockFetch(
+                {},
+                async () => epochTracker.fetchAndParseAsJSON("fetchUrl", {}, "other"),
+                { "x-fluid-epoch": "epoch2" });
         } catch (error) {
             success = false;
             assert.strictEqual(error.errorType, OdspErrorType.epochVersionMismatch, "Error should be epoch error");
@@ -114,11 +111,11 @@ describe("Tests for Epoch Tracker", () => {
         cache.put(cacheEntry1, { value: "val1", fluidEpoch: "epoch1", version: "0.1" }, 0);
         // This will set the initial epoch value in epoch tracker.
         await mockFetch({}, async () => {
-            return epochTracker.fetchFromCache(cacheEntry1, undefined, FetchType.other);
+            return epochTracker.fetchFromCache(cacheEntry1, undefined, "other");
         });
         try {
             await mockFetch({}, async () => {
-                return epochTracker.fetchResponse("fetchUrl", {}, FetchType.other);
+                return epochTracker.fetchArray("fetchUrl", {}, "other");
             });
         } catch (error) {
             success = false;
@@ -137,16 +134,67 @@ describe("Tests for Epoch Tracker", () => {
         cache.put(cacheEntry1, { value: "val1", fluidEpoch: "epoch1", version: "0.1" }, 0);
         // This will set the initial epoch value in epoch tracker.
         await mockFetch({}, async () => {
-            return epochTracker.fetchFromCache(cacheEntry1, undefined, FetchType.other);
+            return epochTracker.fetchFromCache(cacheEntry1, undefined, "other");
         });
         try {
-            await mockFetch({ headers: { "x-fluid-epoch": "epoch1" } }, async () => {
-                return epochTracker.fetchAndParseAsJSON("fetchUrl", {}, FetchType.other);
-            });
+            await mockFetch(
+                {},
+                async () => epochTracker.fetchAndParseAsJSON("fetchUrl", {}, "other"),
+                { "x-fluid-epoch": "epoch1" });
         } catch (error) {
             success = false;
         }
         assert.strictEqual(success, true, "Fetching should succeed!!");
         assert.strictEqual((await cache.get(cacheEntry1)).value, "val1", "Entry in cache should be present");
+    });
+
+    it("Should differentiate between epoch and coherency 409 errors when coherency 409", async () => {
+        let success: boolean = true;
+        const resolvedUrl = ({ siteUrl, driveId, itemId } as any) as IOdspResolvedUrl;
+        const cacheEntry1: ICacheEntry = {
+            key:"key1",
+            type: "snapshot",
+            file: { docId: hashedDocumentId, resolvedUrl } };
+        cache.put(cacheEntry1, { value: "val1", fluidEpoch: "epoch1", version: "0.1" }, 0);
+        // This will set the initial epoch value in epoch tracker.
+        await mockFetch({}, async () => {
+            return epochTracker.fetchFromCache(cacheEntry1, undefined, "other");
+        });
+        try {
+            await mockFetchCore(
+                async () => epochTracker.fetchAndParseAsJSON("fetchUrl", {}, "other"),
+                async () => createResponse({ "x-fluid-epoch": "epoch1" }, undefined, 409));
+        } catch (error) {
+            success = false;
+            assert.strictEqual(error.errorType, DriverErrorType.throttlingError, "Error should be throttling error");
+        }
+        assert.strictEqual(success, false, "Fetching should not succeed!!");
+        assert.strictEqual((await cache.get(cacheEntry1)).value, "val1",
+            "Entry in cache should be present because it was not epoch 409");
+    });
+
+    it("Should differentiate between epoch and coherency 409 errors when epoch 409", async () => {
+        let success: boolean = true;
+        const resolvedUrl = ({ siteUrl, driveId, itemId } as any) as IOdspResolvedUrl;
+        const cacheEntry1: ICacheEntry = {
+            key:"key1",
+            type: "snapshot",
+            file: { docId: hashedDocumentId, resolvedUrl } };
+        cache.put(cacheEntry1, { value: "val1", fluidEpoch: "epoch1", version: "0.1" }, 0);
+        // This will set the initial epoch value in epoch tracker.
+        await mockFetch({}, async () => {
+            return epochTracker.fetchFromCache(cacheEntry1, undefined, "other");
+        });
+        try {
+            await mockFetchCore(
+                async () => epochTracker.fetchAndParseAsJSON("fetchUrl", {}, "other"),
+                async () => createResponse({ "x-fluid-epoch": "epoch2" }, undefined, 409));
+        } catch (error) {
+            success = false;
+            assert.strictEqual(error.errorType, OdspErrorType.epochVersionMismatch, "Error should be epoch error");
+        }
+        assert.strictEqual(success, false, "Fetching should not succeed!!");
+        assert((await cache.get(cacheEntry1)) === undefined,
+            "Entry in cache should be absent because it was epoch 409");
     });
 });

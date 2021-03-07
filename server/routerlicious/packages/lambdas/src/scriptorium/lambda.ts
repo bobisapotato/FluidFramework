@@ -15,7 +15,7 @@ import {
 
 export class ScriptoriumLambda implements IPartitionLambda {
     private pending = new Map<string, ISequencedOperationMessage[]>();
-    private pendingOffset: IQueuedMessage;
+    private pendingOffset: IQueuedMessage | undefined;
     private current = new Map<string, ISequencedOperationMessage[]>();
 
     constructor(
@@ -34,11 +34,14 @@ export class ScriptoriumLambda implements IPartitionLambda {
                 value.operation.traces = [];
 
                 const topic = `${value.tenantId}/${value.documentId}`;
-                if (!this.pending.has(topic)) {
-                    this.pending.set(topic, []);
+
+                let pendingMessages = this.pending.get(topic);
+                if (!pendingMessages) {
+                    pendingMessages = [];
+                    this.pending.set(topic, pendingMessages);
                 }
 
-                this.pending.get(topic).push(value);
+                pendingMessages.push(value);
             }
         }
 
@@ -65,7 +68,7 @@ export class ScriptoriumLambda implements IPartitionLambda {
         this.pending = temp;
         const batchOffset = this.pendingOffset;
 
-        const allProcessed = [];
+        const allProcessed: Promise<void>[] = [];
 
         // Process all the batches + checkpoint
         for (const [, messages] of this.current) {
@@ -76,11 +79,12 @@ export class ScriptoriumLambda implements IPartitionLambda {
         Promise.all(allProcessed).then(
             () => {
                 this.current.clear();
-                this.context.checkpoint(batchOffset);
+                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+                this.context.checkpoint(batchOffset!);
                 this.sendPending();
             },
             (error) => {
-                this.context.error(error, true);
+                this.context.error(error, { restart: true });
             });
     }
 
@@ -89,8 +93,10 @@ export class ScriptoriumLambda implements IPartitionLambda {
     }
 
     private async insertOp(messages: ISequencedOperationMessage[]) {
-        const dbOps = messages.map((message) => ({ ...message,
-            mongoTimestamp: new Date(message.operation.timestamp) }));
+        const dbOps = messages.map((message) => ({
+            ...message,
+            mongoTimestamp: new Date(message.operation.timestamp),
+        }));
         return this.opCollection
             .insertMany(dbOps, false)
             .catch(async (error) => {

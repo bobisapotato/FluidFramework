@@ -6,7 +6,6 @@
 // TODO: Some of these should be fixed
 /* eslint-disable no-bitwise */
 /* eslint-disable max-len */
-/* eslint-disable import/no-extraneous-dependencies */
 /* eslint-disable no-restricted-syntax */
 /* eslint-disable guard-for-in */
 /* eslint-disable @typescript-eslint/no-for-in-array */
@@ -14,16 +13,14 @@
 
 import path from "path";
 import { Trace } from "@fluidframework/common-utils";
-// eslint-disable-next-line import/no-duplicates
 import * as MergeTree from "@fluidframework/merge-tree";
-// eslint-disable-next-line no-duplicate-imports
+// eslint-disable-next-line @typescript-eslint/no-duplicate-imports
 import {
     TextSegment,
     createGroupOp,
     PropertySet,
     MergeTreeTextHelper,
     IMergeTreeDeltaOp,
-    // eslint-disable-next-line import/no-duplicates
 } from "@fluidframework/merge-tree";
 import {
     LocalClientId,

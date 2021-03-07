@@ -4,7 +4,7 @@
  */
 
 import { stringToBuffer } from "@fluidframework/common-utils";
-import { IDocumentStorageService } from "@fluidframework/driver-definitions";
+import { IDocumentStorageService, IDocumentStorageServicePolicies } from "@fluidframework/driver-definitions";
 import { DocumentStorageServiceProxy } from "./documentStorageServiceProxy";
 
 /**
@@ -16,6 +16,10 @@ export class BlobCacheStorageService extends DocumentStorageServiceProxy {
         private readonly blobs: Map<string, string>,
     ) {
         super(internalStorageService);
+    }
+
+    public get policies(): IDocumentStorageServicePolicies | undefined {
+        return this.internalStorageService.policies;
     }
 
     public async read(id: string): Promise<string> {

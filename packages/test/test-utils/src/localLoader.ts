@@ -6,12 +6,12 @@
 import {
     ICodeLoader,
     IContainer,
-    ILoader,
+    IHostLoader,
     ILoaderOptions,
 } from "@fluidframework/container-definitions";
 import { Loader } from "@fluidframework/container-loader";
 import { IFluidCodeDetails, IRequest } from "@fluidframework/core-interfaces";
-import { IUrlResolver } from "@fluidframework/driver-definitions";
+import { IDocumentServiceFactory, IUrlResolver } from "@fluidframework/driver-definitions";
 import { LocalDocumentServiceFactory } from "@fluidframework/local-driver";
 import { ILocalDeltaConnectionServer } from "@fluidframework/server-local-server";
 import { fluidEntryPoint, LocalCodeLoader } from "./localCodeLoader";
@@ -26,8 +26,28 @@ export function createLocalLoader(
     deltaConnectionServer: ILocalDeltaConnectionServer,
     urlResolver: IUrlResolver,
     options?: ILoaderOptions,
-): ILoader {
+): IHostLoader {
     const documentServiceFactory = new LocalDocumentServiceFactory(deltaConnectionServer);
+
+    return createLoader(
+        packageEntries,
+        documentServiceFactory,
+        urlResolver,
+        options,
+    );
+}
+
+/**
+ * Creates a loader with the given package entries and a delta connection server.
+ * @param packageEntries - A list of code details to Fluid entry points.
+ * @param deltaConnectionServer - The delta connection server to use as the server.
+ */
+export function createLoader(
+    packageEntries: Iterable<[IFluidCodeDetails, fluidEntryPoint]>,
+    documentServiceFactory: IDocumentServiceFactory,
+    urlResolver: IUrlResolver,
+    options?: ILoaderOptions,
+): IHostLoader {
     const codeLoader: ICodeLoader = new LocalCodeLoader(packageEntries);
 
     return new Loader({
@@ -47,7 +67,7 @@ export function createLocalLoader(
 
 export async function createAndAttachContainer(
     source: IFluidCodeDetails,
-    loader: ILoader,
+    loader: IHostLoader,
     attachRequest: IRequest,
 ): Promise<IContainer> {
     const container = await loader.createDetachedContainer(source);
