@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -75,7 +75,7 @@ export interface IValueOperation<T> {
      * @param message - The operation itself
      * @alpha
      */
-    process(value: T, params: any, local: boolean, message: ISequencedDocumentMessage);
+    process(value: T, params: any, local: boolean, message: ISequencedDocumentMessage | undefined);
 }
 
 /**

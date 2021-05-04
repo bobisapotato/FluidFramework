@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -10,10 +10,12 @@ import { assert, hashFile, IsoBuffer, Uint8ArrayToString, unreachableCase } from
 import { ISummaryContext } from "@fluidframework/driver-definitions";
 import { getGitType } from "@fluidframework/protocol-base";
 import * as api from "@fluidframework/protocol-definitions";
+import { TokenFetchOptions } from "@fluidframework/odsp-driver-definitions";
 import { PerformanceEvent } from "@fluidframework/telemetry-utils";
 import {
+    HostStoragePolicyInternal,
     IBlob,
-    ISnapshotRequest,
+    IOdspSummaryPayload,
     ISnapshotResponse,
     ISnapshotTree,
     ISnapshotTreeBaseEntry,
@@ -24,25 +26,24 @@ import {
 import { EpochTracker } from "./epochTracker";
 import { getUrlAndHeadersWithAuth } from "./getUrlAndHeadersWithAuth";
 import { getWithRetryForTokenRefresh } from "./odspUtils";
-import { TokenFetchOptions } from "./tokenFetch";
 
 /* eslint-disable max-len */
 
 // Gate that when flipped, instructs to mark unreferenced nodes as such in the summary sent to SPO.
 function gatesMarkUnreferencedNodes() {
-    // Leave override for testing purposes
-    if (typeof localStorage === "object" && localStorage !== null) {
-        if  (localStorage.FluidMarkUnreferencedNodes === "1") {
-            return true;
+    try {
+        // Leave override for testing purposes
+        if (typeof localStorage === "object" && localStorage !== null) {
+            if  (localStorage.FluidMarkUnreferencedNodes === "1") {
+                return true;
+            }
+            if  (localStorage.FluidMarkUnreferencedNodes === "0") {
+                return false;
+            }
         }
-        if  (localStorage.FluidMarkUnreferencedNodes === "0") {
-            return false;
-        }
-    }
+    } catch (e) {}
 
-    // We are starting disabled. This will be enabled once Apps (Bohemia) have finished GC work.
-    // See - https://github.com/microsoft/FluidFramework/issues/5127
-    return false;
+    return true;
 }
 
 export interface IDedupCaches {
@@ -86,9 +87,10 @@ export class OdspSummaryUploadManager {
 
     constructor(
         private readonly snapshotUrl: string,
-        private readonly getStorageToken: (options: TokenFetchOptions, name?: string) => Promise<string | null>,
+        private readonly getStorageToken: (options: TokenFetchOptions, name: string) => Promise<string | null>,
         private readonly logger: ITelemetryLogger,
         private readonly epochTracker: EpochTracker,
+        private readonly hostPolicy: HostStoragePolicyInternal,
     ) {
     }
 
@@ -112,11 +114,12 @@ export class OdspSummaryUploadManager {
         blobCache: Map<string, IBlob | ArrayBuffer>,
         path: string = ""): Promise<api.ISummaryTree>
     {
-        assert(Object.keys(snapshotTree.commits).length === 0, "There should not be commit tree entries in snapshot");
+        assert(Object.keys(snapshotTree.commits).length === 0, 0x0a9 /* "There should not be commit tree entries in snapshot" */);
 
         const summaryTree: api.ISummaryTree = {
             type: api.SummaryType.Tree,
             tree: {},
+            unreferenced: snapshotTree.unreferenced,
         };
         for (const [key, value] of Object.entries(snapshotTree.blobs)) {
             // fullBlobPath does not start with "/"
@@ -127,7 +130,7 @@ export class OdspSummaryUploadManager {
                 hash = await hashFile(
                     blobValue instanceof ArrayBuffer ?
                         IsoBuffer.from(blobValue) :
-                            IsoBuffer.from(blobValue.content, blobValue.encoding ?? "utf-8"),
+                        IsoBuffer.from(blobValue.content, blobValue.encoding ?? "utf-8"),
                 );
                 this.blobTreeDedupCaches.blobShaToPath.set(hash, fullBlobPath);
             }
@@ -224,7 +227,10 @@ export class OdspSummaryUploadManager {
             "",
             false,
         );
-        const snapshot: ISnapshotRequest = {
+        if (!this.hostPolicy.blobDeduping) {
+            assert(reusedBlobs === 0, 0x0aa /* "No blobs should be deduped" */);
+        }
+        const snapshot: IOdspSummaryPayload = {
             entries: snapshotTree.entries!,
             message: "app",
             sequenceNumber: referenceSequenceNumber,
@@ -302,6 +308,7 @@ export class OdspSummaryUploadManager {
         expanded: boolean = false,
         markUnreferencedNodes: boolean = gatesMarkUnreferencedNodes(),
     ) {
+        const blobDedupingEnabled = this.hostPolicy.blobDeduping ?? false;
         const snapshotTree: ISnapshotTree = {
             type: "tree",
             entries: [] as SnapshotTreeEntry[],
@@ -344,11 +351,11 @@ export class OdspSummaryUploadManager {
                     let cachedPath: string | undefined;
                     // If we are expanding the handle, then the currentPath should exist in the cache as we will get the blob
                     // hash from the cache.
-                    if (expanded) {
+                    if (expanded && blobDedupingEnabled) {
                         hash = this.blobTreeDedupCaches.pathToBlobSha.get(currentPath);
                         if (hash !== undefined) {
                             cachedPath = this.blobTreeDedupCaches.blobShaToPath.get(hash);
-                            assert(cachedPath !== undefined, "path should be defined as path->sha mapping exists");
+                            assert(cachedPath !== undefined, 0x0ab /* "path should be defined as path->sha mapping exists" */);
                         } else {
                             // We may not have the blob hash in case its contents were not returned during snapshot fetch.
                             // In that case just put the current path as cached path as its contents should not have changed
@@ -369,8 +376,10 @@ export class OdspSummaryUploadManager {
                                 encoding: "base64",
                             };
                         }
-                        hash = await hashFile(IsoBuffer.from(value.content, value.encoding));
-                        cachedPath = this.blobTreeDedupCaches.blobShaToPath.get(hash);
+                        if (blobDedupingEnabled) {
+                            hash = await hashFile(IsoBuffer.from(value.content, value.encoding));
+                            cachedPath = this.blobTreeDedupCaches.blobShaToPath.get(hash);
+                        }
                     }
                     (summaryObject as any).content = undefined;
                     // If the cache has the hash of the blob and handle of last summary is also present, then use that
@@ -378,6 +387,9 @@ export class OdspSummaryUploadManager {
                     if (cachedPath === undefined || parentHandle === undefined) {
                         blobs++;
                     } else {
+                        if (!blobDedupingEnabled) {
+                            assert(false, 0x0ac /* "Blob deduping is disabled" */);
+                        }
                         reusedBlobs++;
                         id = `${parentHandle}/${cachedPath}`;
                         value = undefined;
@@ -401,7 +413,7 @@ export class OdspSummaryUploadManager {
                     // We always send whole tree no matter what, even if some part of the tree did not change in order to dedup
                     // the blobs.
                     const summaryTreeToExpand = this.blobTreeDedupCaches.treesPathToTree.get(pathKey);
-                    if (summaryTreeToExpand !== undefined && allowHandleExpansion) {
+                    if (summaryTreeToExpand !== undefined && allowHandleExpansion && blobDedupingEnabled) {
                         blobTreeDedupCachesLatest.treesPathToTree.set(currentPath, summaryTreeToExpand);
                         const result = await this.convertSummaryToSnapshotTree(
                             parentHandle,
@@ -416,7 +428,7 @@ export class OdspSummaryUploadManager {
                         reusedBlobs += result.reusedBlobs;
                         blobs += result.blobs;
                     } else {
-                        if (allowHandleExpansion) {
+                        if (allowHandleExpansion && blobDedupingEnabled) {
                             // Ideally we should not come here as we should have found it in cache. But in order to successfully upload the summary
                             // we are just logging the event. Once we make sure that we don't have any telemetry for this, we would remove this.
                             this.logger.sendErrorEvent({ eventName: "SummaryTreeHandleCacheMiss", parentHandle, handlePath: pathKey });
@@ -442,7 +454,7 @@ export class OdspSummaryUploadManager {
             let entry: SnapshotTreeEntry;
 
             if (value) {
-                assert(id === undefined);
+                assert(id === undefined, 0x0ad /* "Snapshot entry has both a tree value and a referenced id!" */);
                 entry = {
                     value,
                     ...baseEntry,

@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -11,19 +11,18 @@ import {
     IResolvedUrl,
 } from "@fluidframework/driver-definitions";
 import { ITelemetryBaseLogger } from "@fluidframework/common-definitions";
-import { IErrorTrackingService, ISummaryTree } from "@fluidframework/protocol-definitions";
+import { ISummaryTree } from "@fluidframework/protocol-definitions";
 import { ICredentials, IGitCache } from "@fluidframework/server-services-client";
 import {
     ensureFluidResolvedUrl,
     getDocAttributesFromProtocolSummary,
     getQuorumValuesFromProtocolSummary,
 } from "@fluidframework/driver-utils";
-import Axios from "axios";
 import { ChildLogger } from "@fluidframework/telemetry-utils";
 import { DocumentService } from "./documentService";
 import { DocumentService2 } from "./documentService2";
-import { DefaultErrorTracking } from "./errorTracking";
 import { ITokenProvider } from "./tokens";
+import { RouterliciousOrdererRestWrapper } from "./restWrapper";
 
 /**
  * Factory for creating the routerlicious document service. Use this if you want to
@@ -34,7 +33,6 @@ export class RouterliciousDocumentServiceFactory implements IDocumentServiceFact
     constructor(
         private readonly tokenProvider: ITokenProvider,
         private readonly useDocumentService2: boolean = false,
-        private readonly errorTracking: IErrorTrackingService = new DefaultErrorTracking(),
         private readonly disableCache: boolean = false,
         private readonly historianApi: boolean = true,
         private readonly gitCache: IGitCache | undefined = undefined,
@@ -48,7 +46,7 @@ export class RouterliciousDocumentServiceFactory implements IDocumentServiceFact
         logger?: ITelemetryBaseLogger,
     ): Promise<IDocumentService> {
         ensureFluidResolvedUrl(resolvedUrl);
-        assert(!!resolvedUrl.endpoints.ordererUrl);
+        assert(!!resolvedUrl.endpoints.ordererUrl, 0x0b2 /* "Missing orderer URL!" */);
         const parsedUrl = parse(resolvedUrl.url);
         if (!parsedUrl.pathname) {
             throw new Error("Parsed url should contain tenant and doc Id!!");
@@ -61,23 +59,25 @@ export class RouterliciousDocumentServiceFactory implements IDocumentServiceFact
         }
         const documentAttributes = getDocAttributesFromProtocolSummary(protocolSummary);
         const quorumValues = getQuorumValuesFromProtocolSummary(protocolSummary);
-        const token = await this.tokenProvider.fetchStorageToken(
+
+        const logger2 = ChildLogger.create(logger, "RouterliciousDriver");
+        const ordererRestWrapper = await RouterliciousOrdererRestWrapper.load(
             tenantId,
             id,
+            this.tokenProvider,
+            logger2,
+            resolvedUrl.endpoints.ordererUrl,
         );
-        await Axios.post(
-            `${resolvedUrl.endpoints.ordererUrl}/documents/${tenantId}`,
+        await ordererRestWrapper.post(
+            `/documents/${tenantId}`,
             {
                 id,
                 summary: appSummary,
                 sequenceNumber: documentAttributes.sequenceNumber,
                 values: quorumValues,
             },
-            {
-                headers: {
-                    Authorization: `Basic ${token.jwt}`,
-                },
-            });
+        );
+
         return this.createDocumentService(resolvedUrl, logger);
     }
 
@@ -117,7 +117,6 @@ export class RouterliciousDocumentServiceFactory implements IDocumentServiceFact
                 ordererUrl,
                 deltaStorageUrl,
                 storageUrl,
-                this.errorTracking,
                 this.disableCache,
                 this.historianApi,
                 this.credentials,
@@ -131,7 +130,6 @@ export class RouterliciousDocumentServiceFactory implements IDocumentServiceFact
                 ordererUrl,
                 deltaStorageUrl,
                 storageUrl,
-                this.errorTracking,
                 this.disableCache,
                 this.historianApi,
                 this.credentials,

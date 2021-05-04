@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -33,6 +33,7 @@ export class Context {
 
     constructor(
         public readonly gitRepo: GitRepo,
+        public readonly originRemotePartialUrl: string,
         public readonly originalBranchName: string
     ) {
         this.timer = new Timer(commonOptions.timer);

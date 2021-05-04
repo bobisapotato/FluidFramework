@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -29,10 +29,6 @@ export class DocumentStorageServiceProxy implements IDocumentStorageService {
 
     public async getVersions(versionId: string, count: number): Promise<IVersion[]> {
         return this.internalStorageService.getVersions(versionId, count);
-    }
-
-    public async read(blobId: string): Promise<string> {
-        return this.internalStorageService.read(blobId);
     }
 
     public async write(tree: ITree, parents: string[], message: string, ref: string): Promise<IVersion> {

@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -9,10 +9,9 @@ import { v4 as uuid } from "uuid";
 import {
     assert,
     fromBase64ToUtf8,
-    fromUtf8ToBase64,
-    IsoBuffer,
     performance,
     stringToBuffer,
+    bufferToString,
 } from "@fluidframework/common-utils";
 import {
     PerformanceEvent,
@@ -24,31 +23,30 @@ import {
     DriverErrorType,
     LoaderCachingPolicy,
 } from "@fluidframework/driver-definitions";
-import { OdspErrorType, throwOdspNetworkError } from "@fluidframework/odsp-doclib-utils";
+import { throwOdspNetworkError } from "@fluidframework/odsp-doclib-utils";
+import {
+    IOdspResolvedUrl,
+    TokenFetchOptions,
+    IEntry,
+    snapshotKey,
+    ISnapshotOptions,
+    OdspErrorType,
+} from "@fluidframework/odsp-driver-definitions";
 import {
     IDocumentStorageGetVersionsResponse,
-    IOdspResolvedUrl,
     IOdspSnapshot,
     ISequencedDeltaOpMessage,
     HostStoragePolicyInternal,
-    ISnapshotOptions,
     ITree,
     IBlob,
 } from "./contracts";
 import { fetchSnapshot } from "./fetchSnapshot";
 import { getUrlAndHeadersWithAuth } from "./getUrlAndHeadersWithAuth";
-import {
-    IOdspCache,
-    ICacheEntry,
-    IFileEntry,
-    snapshotExpirySummarizerOps,
-    IPersistedCacheValueWithEpoch,
-    persistedCacheValueVersion,
-} from "./odspCache";
-import { getWithRetryForTokenRefresh, IOdspResponse } from "./odspUtils";
-import { TokenFetchOptions } from "./tokenFetch";
+import { IOdspCache } from "./odspCache";
+import { evalBlobsAndTrees, getWithRetryForTokenRefresh, IOdspResponse, ISnapshotCacheValue } from "./odspUtils";
 import { EpochTracker } from "./epochTracker";
 import { OdspSummaryUploadManager } from "./odspSummaryUploadManager";
+import { RateLimiter } from "./rateLimiter";
 
 /* eslint-disable max-len */
 
@@ -76,7 +74,13 @@ function buildHierarchy(
 
         // Add in either the blob or tree
         if (entry.type === "tree") {
-            const newTree = { id: entry.id, blobs: {}, commits: {}, trees: {} };
+            const newTree: api.ISnapshotTree = {
+                id: entry.id,
+                blobs: {},
+                commits: {},
+                trees: {},
+                unreferenced: entry.unreferenced,
+            };
             node.trees[decodeURIComponent(entryPathBase)] = newTree;
             lookup[entry.path] = newTree;
         } else if (entry.type === "blob") {
@@ -131,7 +135,8 @@ class BlobCache {
 
     public addBlobs(blobs: IBlob[]) {
         blobs.forEach((blob) => {
-            assert(blob.encoding === "base64" || blob.encoding === undefined);
+            assert(blob.encoding === "base64" || blob.encoding === undefined,
+                0x0a4 /* `Unexpected blob encoding type: '${blob.encoding}'` */);
             this._blobCache.set(blob.id, blob);
         });
         // Reset the timer on cache set
@@ -226,9 +231,8 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
     private _ops: ISequencedDeltaOpMessage[] | undefined;
 
     private firstVersionCall = true;
-    private _snapshotCacheEntry: ICacheEntry | undefined;
-
-    private readonly fileEntry: IFileEntry;
+    private readonly _snapshotCacheEntry: IEntry;
+    private _snapshotSequenceNumber: number | undefined;
 
     private readonly documentId: string;
     private readonly snapshotUrl: string | undefined;
@@ -244,11 +248,14 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
     private readonly maxSnapshotSizeLimit = 500000000; // 500 MB
     private readonly maxSnapshotFetchTimeout = 120000; // 2 min
 
+    // limits the amount of parallel "attachment" blob uploads
+    private readonly createBlobRateLimiter = new RateLimiter(1);
+
     private readonly blobCache = new BlobCache();
 
     public set ops(ops: ISequencedDeltaOpMessage[] | undefined) {
-        assert(this._ops === undefined);
-        assert(ops !== undefined);
+        assert(this._ops === undefined, 0x0a5 /* "Trying to set ops when they are already set!" */);
+        assert(ops !== undefined, 0x0a6 /* "Input ops are undefined!" */);
         this._ops = ops;
     }
 
@@ -256,13 +263,13 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
         return this._ops;
     }
 
-    public get snapshotCacheEntry() {
-        return this._snapshotCacheEntry;
+    public get snapshotSequenceNumber() {
+        return this._snapshotSequenceNumber;
     }
 
     constructor(
         odspResolvedUrl: IOdspResolvedUrl,
-        private readonly getStorageToken: (options: TokenFetchOptions, name?: string) => Promise<string | null>,
+        private readonly getStorageToken: (options: TokenFetchOptions, name: string) => Promise<string | null>,
         private readonly logger: ITelemetryLogger,
         private readonly fetchFullSnapshot: boolean,
         private readonly cache: IOdspCache,
@@ -275,19 +282,19 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
         this.attachmentPOSTUrl = odspResolvedUrl.endpoints.attachmentPOSTStorageUrl;
         this.attachmentGETUrl = odspResolvedUrl.endpoints.attachmentGETStorageUrl;
 
-        this.fileEntry = {
-            resolvedUrl: odspResolvedUrl,
-            docId: this.documentId,
+        this._snapshotCacheEntry = {
+            type: snapshotKey,
+            key: "",
         };
 
-        this.odspSummaryUploadManager = new OdspSummaryUploadManager(this.snapshotUrl, getStorageToken, logger, epochTracker);
+        this.odspSummaryUploadManager = new OdspSummaryUploadManager(this.snapshotUrl, getStorageToken, logger, epochTracker, this.hostPolicy);
     }
 
     public get repositoryUrl(): string {
         return "";
     }
 
-    public async createBlob(file: Uint8Array): Promise<api.ICreateBlobResponse> {
+    public async createBlob(file: ArrayBufferLike): Promise<api.ICreateBlobResponse> {
         this.checkAttachmentPOSTUrl();
 
         const response = await getWithRetryForTokenRefresh(async (options) => {
@@ -299,18 +306,20 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
                 this.logger,
                 {
                     eventName: "createBlob",
-                    size: file.length,
+                    size: file.byteLength,
+                    waitQueueLength: this.createBlobRateLimiter.waitQueueLength,
                 },
                 async (event) => {
-                    const res = await this.epochTracker.fetchAndParseAsJSON<api.ICreateBlobResponse>(
-                        url,
-                        {
-                            body: file,
-                            headers,
-                            method: "POST",
-                        },
-                        "createBlob",
-                    );
+                    const res = await this.createBlobRateLimiter.schedule(async () =>
+                        this.epochTracker.fetchAndParseAsJSON<api.ICreateBlobResponse>(
+                            url,
+                            {
+                                body: file,
+                                headers,
+                                method: "POST",
+                            },
+                            "createBlob",
+                    ));
                     event.end({
                         blobId: res.content.id,
                         ...res.commonSpoHeaders,
@@ -375,7 +384,7 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
         // this prevents issues when generating summaries
         let documentAttributes: api.IDocumentAttributes;
         if (blob instanceof ArrayBuffer) {
-            documentAttributes = JSON.parse(IsoBuffer.from(blob).toString("utf8"));
+            documentAttributes = JSON.parse(bufferToString(blob, "utf8"));
         } else {
             documentAttributes = JSON.parse(blob.encoding === "base64" ? fromBase64ToUtf8(blob.content) : blob.content);
         }
@@ -399,25 +408,6 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
             return blob;
         }
         return stringToBuffer(blob.content, blob.encoding ?? "utf8");
-    }
-
-    public async read(blobId: string): Promise<string> {
-        return this.readWithEncodingOutput(blobId, "base64");
-    }
-
-    private async readWithEncodingOutput(blobId: string, outputFormat: "base64" | "string"): Promise<string> {
-        const blob = await this.readBlobCore(blobId);
-
-        if (blob instanceof ArrayBuffer) {
-            return IsoBuffer.from(blob).toString(outputFormat === "base64" ? "base64" : "utf8");
-        }
-        if (outputFormat === blob.encoding || (outputFormat === "string" && blob.encoding === undefined))  {
-            return blob.content;
-        } else if (outputFormat === "base64") {
-            return fromUtf8ToBase64(blob.content);
-        } else {
-            return fromBase64ToUtf8(blob.content);
-        }
     }
 
     public async getSnapshotTree(version?: api.IVersion): Promise<api.ISnapshotTree | null> {
@@ -476,7 +466,7 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
             finalTree = this.combineProtocolAndAppSnapshotTree(appTree, protocolTree);
         }
 
-        if (this.hostPolicy.summarizerClient) {
+        if (this.hostPolicy.summarizerClient && this.hostPolicy.blobDeduping) {
             await this.odspSummaryUploadManager.buildCachesForDedup(finalTree, this.blobCache.value);
         }
         return finalTree;
@@ -519,7 +509,7 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
                 }
 
                 const hostSnapshotOptions = this.hostPolicy.snapshotOptions;
-                let cachedSnapshot: IOdspSnapshot | undefined;
+                let cachedSnapshot: ISnapshotCacheValue | undefined;
                 // No need to ask cache twice - if first request was unsuccessful, cache unlikely to have data on second turn.
                 if (tokenFetchOptions.refresh) {
                     cachedSnapshot = await this.fetchSnapshot(hostSnapshotOptions, undefined, tokenFetchOptions);
@@ -528,15 +518,7 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
                         this.logger,
                         { eventName: "ObtainSnapshot" },
                         async (event: PerformanceEvent) => {
-                            const cachedSnapshotP = this.epochTracker.fetchFromCache<IOdspSnapshot>(
-                                {
-                                    file: this.fileEntry,
-                                    type: "snapshot",
-                                    key: "",
-                                },
-                                this.hostPolicy.summarizerClient ? snapshotExpirySummarizerOps : undefined,
-                                "treesLatest",
-                            );
+                            const cachedSnapshotP: Promise<ISnapshotCacheValue | undefined> = this.epochTracker.get(this._snapshotCacheEntry);
 
                             let method: string;
                             if (this.hostPolicy.concurrentSnapshotFetch && !this.hostPolicy.summarizerClient) {
@@ -567,7 +549,8 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
                         });
                 }
 
-                const odspSnapshot: IOdspSnapshot = cachedSnapshot;
+                const odspSnapshot: IOdspSnapshot = cachedSnapshot.snapshot;
+                this._snapshotSequenceNumber = cachedSnapshot.sequenceNumber;
 
                 const { trees, blobs, ops } = odspSnapshot;
                 // id should be undefined in case of just ops in snapshot.
@@ -587,10 +570,10 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
                 return id ? [{ id, treeId: undefined! }] : [];
             }).catch(async (error) => {
                 const errorType = error.errorType;
-                // Clear the cache on 401/403/404 on snapshot fetch from network because this means either the user doesn't have permissions
+                // Clear the cache on 401/403/404 on snapshot fetch from network because this means either the user doesn't have
                 // permissions for the file or it was deleted. So the user will again try to fetch from cache on any failure in future.
                 if (errorType === DriverErrorType.authorizationError || errorType === DriverErrorType.fileNotFoundOrAccessDeniedError) {
-                    await this.cache.persistedCache.removeEntries(this.fileEntry);
+                    await this.cache.persistedCache.removeEntries();
                 }
                 throw error;
             });
@@ -639,11 +622,8 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
         hostSnapshotOptions: ISnapshotOptions | undefined,
         driverSnapshotOptions: ISnapshotOptions | undefined,
         tokenFetchOptions: TokenFetchOptions,
-    ): Promise<IOdspSnapshot> {
+    ) {
         const snapshotOptions: ISnapshotOptions = driverSnapshotOptions ?? {
-            deltas: 1,
-            channels: 1,
-            blobs: 2,
             mds: this.maxSnapshotSizeLimit,
             ...hostSnapshotOptions,
             timeout: hostSnapshotOptions?.timeout ? Math.min(hostSnapshotOptions.timeout, this.maxSnapshotFetchTimeout) : this.maxSnapshotFetchTimeout,
@@ -653,20 +633,9 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
         if (this.hostPolicy.summarizerClient) {
             snapshotOptions.mds = undefined;
         }
-        let abortController: AbortController | undefined;
-        if (this.hostPolicy.summarizerClient !== true) {
-            abortController = new AbortController();
-            const timeout = setTimeout(
-                () => {
-                    clearTimeout(timeout);
-                    abortController?.abort();
-                },
-                snapshotOptions.timeout,
-            );
-        }
 
         try {
-            const odspSnapshot = await this.fetchSnapshotCore(snapshotOptions, tokenFetchOptions, abortController);
+            const odspSnapshot = await this.fetchSnapshotCore(snapshotOptions, tokenFetchOptions);
             return odspSnapshot;
         } catch (error) {
             const errorType = error.errorType;
@@ -676,7 +645,11 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
             }
             // If the first snapshot request was with blobs and we either timed out or the size was too big, then try to fetch without blobs.
             if ((errorType === OdspErrorType.snapshotTooBig || errorType === OdspErrorType.fetchTimeout) && snapshotOptions.blobs) {
-                const snapshotOptionsWithoutBlobs: ISnapshotOptions = { ...snapshotOptions, blobs: 0, mds: undefined };
+                this.logger.sendErrorEvent({
+                    eventName: "TreeLatest_SecondCall",
+                    errorType,
+                });
+                const snapshotOptionsWithoutBlobs: ISnapshotOptions = { ...snapshotOptions, blobs: 0, mds: undefined, timeout: undefined };
                 return this.fetchSnapshotCore(snapshotOptionsWithoutBlobs, tokenFetchOptions);
             }
             throw error;
@@ -686,158 +659,155 @@ export class OdspDocumentStorageService implements IDocumentStorageService {
     private async fetchSnapshotCore(
         snapshotOptions: ISnapshotOptions,
         tokenFetchOptions: TokenFetchOptions,
-        controller?: AbortController,
-    ): Promise<IOdspSnapshot> {
+    ) {
         const storageToken = await this.getStorageToken(tokenFetchOptions, "TreesLatest");
         const url = `${this.snapshotUrl}/trees/latest?ump=1`;
         const formBoundary = uuid();
-        let postBody = `--${formBoundary}\r\n`;
-        postBody += `Authorization: Bearer ${storageToken}\r\n`;
-        postBody += `X-HTTP-Method-Override: GET\r\n`;
+        const formParams: string[] = [];
+        formParams.push(`--${formBoundary}`);
+        formParams.push(`Authorization: Bearer ${storageToken}`);
+        formParams.push(`X-HTTP-Method-Override: GET`);
+        const logOptions = {};
         Object.entries(snapshotOptions).forEach(([key, value]) => {
             if (value !== undefined) {
-                postBody += `${key}: ${value}\r\n`;
+                formParams.push(`${key}: ${value}`);
+                logOptions[`snapshotOption_${key}`] = value;
             }
         });
         if (this.redeemSharingLink) {
-            postBody += `sl: ${this.redeemSharingLink}\r\n`;
+            formParams.push(`sl: ${this.redeemSharingLink}`);
         }
-        postBody += `_post: 1\r\n`;
-        postBody += `\r\n--${formBoundary}--`;
+        formParams.push(`_post: 1`);
+        formParams.push(`\r\n--${formBoundary}--`);
+        const postBody = formParams.join("\r\n");
         const headers: {[index: string]: any} = {
             "Content-Type": `multipart/form-data;boundary=${formBoundary}`,
         };
 
-        // This event measures only successful cases of getLatest call (no tokens, no retries).
-        const odspSnapshot = await PerformanceEvent.timedExecAsync(this.logger, { eventName: "TreesLatest", fetchTimeout: snapshotOptions.timeout, maxSnapshotSize: snapshotOptions.mds }, async (event) => {
-            const startTime = performance.now();
-            const response: IOdspResponse<IOdspSnapshot> = await this.epochTracker.fetchAndParseAsJSON<IOdspSnapshot>(
-                url,
-                {
-                    body: postBody,
-                    headers,
-                    signal: controller?.signal,
-                    method: "POST",
-                },
-                "treesLatest",
-                true,
+        let controller: AbortController | undefined;
+        if (this.hostPolicy.summarizerClient !== true) {
+            controller = new AbortController();
+            setTimeout(
+                () => controller!.abort(),
+                snapshotOptions.timeout,
             );
-            const endTime = performance.now();
-            const overallTime = endTime - startTime;
-            const snapshot: IOdspSnapshot = response.content;
-            let dnstime: number | undefined; // domainLookupEnd - domainLookupStart
-            let redirectTime: number | undefined; // redirectEnd -redirectStart
-            let tcpHandshakeTime: number | undefined; // connectEnd  - connectStart
-            let secureConntime: number | undefined; // connectEnd  - secureConnectionStart
-            let responseTime: number | undefined; // responsEnd - responseStart
-            let fetchStToRespEndTime: number | undefined; // responseEnd  - fetchStart
-            let reqStToRespEndTime: number | undefined; // responseEnd - requestStart
-            let networkTime: number | undefined; // responseEnd - startTime
-            const spReqDuration = response.headers.get("sprequestduration");
+        }
 
-            // getEntriesByType is only available in browser performance object
-            const resources1 = performance.getEntriesByType?.("resource") ?? [];
-            // Usually the latest fetch call is to the end of resources, so we start from the end.
-            for (let i = resources1.length - 1; i > 0; i--) {
-                const indResTime = resources1[i] as PerformanceResourceTiming;
-                const resource_name = indResTime.name;
-                const resource_initiatortype = indResTime.initiatorType;
-                if ((resource_initiatortype.localeCompare("fetch") === 0) && (resource_name.localeCompare(url) === 0)) {
-                    redirectTime = indResTime.redirectEnd - indResTime.redirectStart;
-                    dnstime = indResTime.domainLookupEnd - indResTime.domainLookupStart;
-                    tcpHandshakeTime = indResTime.connectEnd - indResTime.connectStart;
-                    secureConntime = (indResTime.secureConnectionStart > 0) ? (indResTime.connectEnd - indResTime.secureConnectionStart) : 0;
-                    responseTime = indResTime.responseEnd - indResTime.responseStart;
-                    fetchStToRespEndTime = (indResTime.fetchStart > 0) ? (indResTime.responseEnd - indResTime.fetchStart) : 0;
-                    reqStToRespEndTime = (indResTime.requestStart > 0) ? (indResTime.responseEnd - indResTime.requestStart) : 0;
-                    networkTime = (indResTime.startTime > 0) ? (indResTime.responseEnd - indResTime.startTime) : 0;
-                    if (spReqDuration) {
-                        networkTime = networkTime - parseInt(spReqDuration, 10);
-                    }
-                    break;
-                }
-            }
-
-            const { numTrees, numBlobs, encodedBlobsSize, decodedBlobsSize } = this.evalBlobsAndTrees(snapshot);
-            const clientTime = networkTime ? overallTime - networkTime : undefined;
-
-            assert(this._snapshotCacheEntry === undefined);
-            this._snapshotCacheEntry = {
-                file: this.fileEntry,
-                type: "snapshot",
-                key: "",
-            };
-
-            // There are some scenarios in ODSP where we cannot cache, trees/latest will explicitly tell us when we cannot cache using an HTTP response header.
-            const canCache = response.headers.get("disablebrowsercachingofusercontent") !== "true";
-            // There maybe no snapshot - TreesLatest would return just ops.
-            const seqNumber: number = (snapshot.trees && (snapshot.trees[0] as any).sequenceNumber) ?? 0;
-            const seqNumberFromOps = snapshot.ops && snapshot.ops.length > 0 ?
-                snapshot.ops[0].sequenceNumber - 1 :
-                undefined;
-
-            if (!Number.isInteger(seqNumber) || seqNumberFromOps !== undefined && seqNumberFromOps !== seqNumber) {
-                this.logger.sendErrorEvent({ eventName: "fetchSnapshotError", seqNumber, seqNumberFromOps });
-            } else if (canCache) {
-                const cacheValue: IPersistedCacheValueWithEpoch = {
-                    value: snapshot,
-                    fluidEpoch: this.epochTracker.fluidEpoch,
-                    version: persistedCacheValueVersion,
-                };
-                this.cache.persistedCache.put(
-                    this._snapshotCacheEntry,
-                    cacheValue,
-                    seqNumber,
+        // This event measures only successful cases of getLatest call (no tokens, no retries).
+        return PerformanceEvent.timedExecAsync(
+            this.logger,
+            {
+                eventName: "TreesLatest",
+                ...logOptions,
+            },
+            async (event) => {
+                const startTime = performance.now();
+                const response: IOdspResponse<IOdspSnapshot> = await this.epochTracker.fetchAndParseAsJSON<IOdspSnapshot>(
+                    url,
+                    {
+                        body: postBody,
+                        headers,
+                        signal: controller?.signal,
+                        method: "POST",
+                    },
+                    "treesLatest",
+                    true,
                 );
-            }
+                const endTime = performance.now();
+                const overallTime = endTime - startTime;
+                const snapshot: IOdspSnapshot = response.content;
+                let dnstime: number | undefined; // domainLookupEnd - domainLookupStart
+                let redirectTime: number | undefined; // redirectEnd -redirectStart
+                let tcpHandshakeTime: number | undefined; // connectEnd  - connectStart
+                let secureConntime: number | undefined; // connectEnd  - secureConnectionStart
+                let responseTime: number | undefined; // responsEnd - responseStart
+                let fetchStToRespEndTime: number | undefined; // responseEnd  - fetchStart
+                let reqStToRespEndTime: number | undefined; // responseEnd - requestStart
+                let networkTime: number | undefined; // responseEnd - startTime
+                const spReqDuration = response.headers.get("sprequestduration");
 
-            event.end({
-                trees: numTrees,
-                blobs: snapshot.blobs?.length ?? 0,
-                leafNodes: numBlobs,
-                encodedBlobsSize,
-                decodedBlobsSize,
-                seqNumber,
-                ops: snapshot.ops?.length ?? 0,
-                headers: Object.keys(headers).length !== 0 ? true : undefined,
-                redirecttime: redirectTime,
-                dnsLookuptime: dnstime,
-                responsenetworkTime: responseTime,
-                tcphandshakeTime: tcpHandshakeTime,
-                secureconnectiontime: secureConntime,
-                fetchstarttorespendtime: fetchStToRespEndTime,
-                reqstarttorespendtime: reqStToRespEndTime,
-                overalltime: overallTime,
-                networktime: networkTime,
-                clienttime: clientTime,
-                ...response.commonSpoHeaders,
-            });
-            return snapshot;
-        });
-        return odspSnapshot;
-    }
-
-    private evalBlobsAndTrees(snapshot: IOdspSnapshot) {
-        let numTrees = 0;
-        let numBlobs = 0;
-        let encodedBlobsSize = 0;
-        let decodedBlobsSize = 0;
-        for (const tree of snapshot.trees) {
-            for(const treeEntry of tree.entries) {
-                if (treeEntry.type === "blob") {
-                    numBlobs++;
-                } else if (treeEntry.type === "tree") {
-                    numTrees++;
+                // getEntriesByType is only available in browser performance object
+                const resources1 = performance.getEntriesByType?.("resource") ?? [];
+                // Usually the latest fetch call is to the end of resources, so we start from the end.
+                for (let i = resources1.length - 1; i > 0; i--) {
+                    const indResTime = resources1[i] as PerformanceResourceTiming;
+                    const resource_name = indResTime.name;
+                    const resource_initiatortype = indResTime.initiatorType;
+                    if ((resource_initiatortype.localeCompare("fetch") === 0) && (resource_name.localeCompare(url) === 0)) {
+                        redirectTime = indResTime.redirectEnd - indResTime.redirectStart;
+                        dnstime = indResTime.domainLookupEnd - indResTime.domainLookupStart;
+                        tcpHandshakeTime = indResTime.connectEnd - indResTime.connectStart;
+                        secureConntime = (indResTime.secureConnectionStart > 0) ? (indResTime.connectEnd - indResTime.secureConnectionStart) : 0;
+                        responseTime = indResTime.responseEnd - indResTime.responseStart;
+                        fetchStToRespEndTime = (indResTime.fetchStart > 0) ? (indResTime.responseEnd - indResTime.fetchStart) : 0;
+                        reqStToRespEndTime = (indResTime.requestStart > 0) ? (indResTime.responseEnd - indResTime.requestStart) : 0;
+                        networkTime = (indResTime.startTime > 0) ? (indResTime.responseEnd - indResTime.startTime) : 0;
+                        if (spReqDuration) {
+                            networkTime = networkTime - parseInt(spReqDuration, 10);
+                        }
+                        break;
+                    }
                 }
+
+                const { numTrees, numBlobs, encodedBlobsSize, decodedBlobsSize } = evalBlobsAndTrees(snapshot);
+                const clientTime = networkTime ? overallTime - networkTime : undefined;
+
+                // There are some scenarios in ODSP where we cannot cache, trees/latest will explicitly tell us when we cannot cache using an HTTP response header.
+                const canCache = response.headers.get("disablebrowsercachingofusercontent") !== "true";
+                // There maybe no snapshot - TreesLatest would return just ops.
+                const sequenceNumber: number = (snapshot.trees && (snapshot.trees[0] as any).sequenceNumber) ?? 0;
+                const seqNumberFromOps = snapshot.ops && snapshot.ops.length > 0 ?
+                    snapshot.ops[0].sequenceNumber - 1 :
+                    undefined;
+
+                const value: ISnapshotCacheValue = { snapshot, sequenceNumber };
+
+                if (!Number.isInteger(sequenceNumber) || seqNumberFromOps !== undefined && seqNumberFromOps !== sequenceNumber) {
+                    this.logger.sendErrorEvent({ eventName: "fetchSnapshotError", sequenceNumber, seqNumberFromOps });
+                    value.sequenceNumber = undefined;
+                } else if (canCache) {
+                    this.cache.persistedCache.put(
+                        this._snapshotCacheEntry,
+                        value,
+                    ).catch(() => {});
+                }
+
+                event.end({
+                    trees: numTrees,
+                    blobs: snapshot.blobs?.length ?? 0,
+                    leafNodes: numBlobs,
+                    encodedBlobsSize,
+                    decodedBlobsSize,
+                    sequenceNumber,
+                    ops: snapshot.ops?.length ?? 0,
+                    headers: Object.keys(headers).length !== 0 ? true : undefined,
+                    redirecttime: redirectTime,
+                    dnsLookuptime: dnstime,
+                    responsenetworkTime: responseTime,
+                    tcphandshakeTime: tcpHandshakeTime,
+                    secureconnectiontime: secureConntime,
+                    fetchstarttorespendtime: fetchStToRespEndTime,
+                    reqstarttorespendtime: reqStToRespEndTime,
+                    overalltime: overallTime,
+                    networktime: networkTime,
+                    clienttime: clientTime,
+                    // Sharing link telemetry regarding sharing link redeem status and performance. Ex: FRL; dur=100, FRS; desc=S, FRP; desc=False
+                    // Here, FRL is the duration taken for redeem, FRS is the redeem status (S means success), and FRP is a flag to indicate if the permission has changed.
+                    sltelemetry: response.headers.get("x-fluid-sltelemetry"),
+                    ...response.commonSpoHeaders,
+                });
+                return value;
+            },
+        ).catch((error) => {
+            // Issue #5895:
+            // If we are offline, this error is retryable. But that means that RetriableDocumentStorageService
+            // will run in circles calling getSnapshotTree, which would result in this class going getVersions / individual blob download path.
+            // This path is very slow, and will not work with delay-loaded data stores and ODSP storage deleting old snapshots and blobs.
+            if (typeof error === "object" && error !== null) {
+                error.canRetry = false;
             }
-        }
-        if (snapshot.blobs !== undefined) {
-            for (const blob of snapshot.blobs) {
-                decodedBlobsSize += blob.size;
-                encodedBlobsSize += blob.content.length;
-            }
-        }
-        return { numTrees, numBlobs, encodedBlobsSize, decodedBlobsSize };
+            throw error;
+        });
     }
 
     public async write(tree: api.ITree, parents: string[], message: string): Promise<api.IVersion> {

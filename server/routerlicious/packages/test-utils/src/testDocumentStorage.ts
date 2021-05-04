@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -105,6 +105,7 @@ export class TestDocumentStorage implements IDocumentStorage {
             sequenceNumber,
             epoch: undefined,
             term: 1,
+            lastSentMSN: 0,
         };
 
         const scribe: IScribe = {

@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -19,11 +19,12 @@ import {
     IContainer,
     IHostLoader,
     ILoader,
+    IPendingLocalState,
     ILoaderOptions,
     IProxyLoaderFactory,
     LoaderHeader,
 } from "@fluidframework/container-definitions";
-import { Deferred, performance } from "@fluidframework/common-utils";
+import { performance } from "@fluidframework/common-utils";
 import { ChildLogger, DebugLogger, PerformanceEvent } from "@fluidframework/telemetry-utils";
 import {
     IDocumentServiceFactory,
@@ -50,17 +51,9 @@ function canUseCache(request: IRequest): boolean {
 }
 
 export class RelativeLoader extends EventEmitter implements ILoader {
-    // Because the loader is passed to the container during construction we need to resolve the target container
-    // after construction.
-    private readonly containerDeferred = new Deferred<Container>();
-
-    /**
-     * BaseRequest is the original request that triggered the load. This URL is used in case credentials need
-     * to be fetched again.
-     */
     constructor(
         private readonly loader: ILoader,
-        private readonly containerUrl: () => string | undefined,
+        private readonly container: Container,
     ) {
         super();
     }
@@ -69,33 +62,34 @@ export class RelativeLoader extends EventEmitter implements ILoader {
 
     public async resolve(request: IRequest): Promise<IContainer> {
         if (request.url.startsWith("/")) {
-            // If no headers are set that require a reload make use of the same object
-            const container = await this.containerDeferred.promise;
-            return container;
+            if (canUseCache(request)) {
+                return this.container;
+            } else {
+                const resolvedUrl = this.container.resolvedUrl;
+                ensureFluidResolvedUrl(resolvedUrl);
+                const container = await Container.load(
+                    this.loader as Loader,
+                    {
+                        canReconnect: request.headers?.[LoaderHeader.reconnect],
+                        clientDetailsOverride: request.headers?.[LoaderHeader.clientDetails],
+                        resolvedUrl: {...resolvedUrl},
+                        version: request.headers?.[LoaderHeader.version],
+                        loadMode: request.headers?.[LoaderHeader.loadMode],
+                    },
+                );
+                return container;
+            }
         }
 
         return this.loader.resolve(request);
     }
 
     public async request(request: IRequest): Promise<IResponse> {
-        const containerUrl = this.containerUrl();
         if (request.url.startsWith("/")) {
-            let container: IContainer;
-            if (canUseCache(request)) {
-                container = await this.containerDeferred.promise;
-            } else if (containerUrl === undefined) {
-                throw new Error("Container url is not provided");
-            } else {
-                container = await this.loader.resolve({ url: containerUrl, headers: request.headers });
-            }
+            const container = await this.resolve(request);
             return container.request(request);
         }
-
         return this.loader.request(request);
-    }
-
-    public resolveContainer(container: Container) {
-        this.containerDeferred.resolve(container);
     }
 }
 
@@ -241,13 +235,19 @@ export class Loader extends EventEmitter implements IHostLoader {
 
     constructor(loaderProps: ILoaderProps) {
         super();
+
+        const scope = { ...loaderProps.scope };
+        if (loaderProps.options?.provideScopeLoader === true) {
+            scope.ILoader = this;
+        }
+
         this.services = {
             urlResolver: createCachedResolver(MultiUrlResolver.create(loaderProps.urlResolver)),
             documentServiceFactory: MultiDocumentServiceFactory.create(loaderProps.documentServiceFactory),
             codeLoader: loaderProps.codeLoader,
             options: loaderProps.options ?? {},
-            scope: loaderProps.scope ?? {},
-            subLogger: DebugLogger.mixinDebugLogger("fluid:telemetry", loaderProps.logger, { loaderId: uuid() }),
+            scope,
+            subLogger: DebugLogger.mixinDebugLogger("fluid:telemetry", loaderProps.logger, { all:{loaderId: uuid()} }),
             proxyLoaderFactories: loaderProps.proxyLoaderFactories ?? new Map<string, IProxyLoaderFactory>(),
         };
         this.logger = ChildLogger.create(this.services.subLogger, "Loader");
@@ -279,14 +279,16 @@ export class Loader extends EventEmitter implements IHostLoader {
     public async rehydrateDetachedContainerFromSnapshot(snapshot: string): Promise<Container> {
         debug(`Container creating in detached state: ${performance.now()} `);
 
-        return Container.rehydrateDetachedFromSnapshot(
-            this,
-            JSON.parse(snapshot));
+        return Container.rehydrateDetachedFromSnapshot(this, snapshot);
     }
 
-    public async resolve(request: IRequest): Promise<Container> {
-        return PerformanceEvent.timedExecAsync(this.logger, { eventName: "Resolve" }, async () => {
-            const resolved = await this.resolveCore(request);
+    public async resolve(request: IRequest, pendingLocalState?: string): Promise<Container> {
+        const eventName = pendingLocalState === undefined ? "Resolve" : "ResolveWithPendingState";
+        return PerformanceEvent.timedExecAsync(this.logger, { eventName }, async () => {
+            const resolved = await this.resolveCore(
+                request,
+                pendingLocalState !== undefined ? JSON.parse(pendingLocalState) : undefined,
+            );
             return resolved.container;
         });
     }
@@ -321,6 +323,7 @@ export class Loader extends EventEmitter implements IHostLoader {
 
     private async resolveCore(
         request: IRequest,
+        pendingLocalState?: IPendingLocalState,
     ): Promise<{ container: Container; parsed: IParsedUrl }> {
         const resolvedAsFluid = await this.services.urlResolver.resolve(request);
         ensureFluidResolvedUrl(resolvedAsFluid);
@@ -331,12 +334,22 @@ export class Loader extends EventEmitter implements IHostLoader {
             throw new Error(`Invalid URL ${resolvedAsFluid.url}`);
         }
 
+        if (pendingLocalState !== undefined) {
+            const parsedPendingUrl = parseUrl(pendingLocalState.url);
+            if (parsedPendingUrl?.id !== parsed.id ||
+                parsedPendingUrl?.path.replace(/\/$/, "") !== parsed.path.replace(/\/$/, "")) {
+                const message = `URL ${resolvedAsFluid.url} does not match pending state URL ${pendingLocalState.url}`;
+                throw new Error(message);
+            }
+        }
+
         // parseUrl's id is expected to be of format "tenantId/docId"
         const [, docId] = parsed.id.split("/");
         const { canCache, fromSequenceNumber } = this.parseHeader(parsed, request);
+        const shouldCache = pendingLocalState !== undefined ? false : canCache;
 
         let container: Container;
-        if (canCache) {
+        if (shouldCache) {
             const key = this.getKeyForContainerCache(request, parsed);
             const maybeContainer = await this.containers.get(key);
             if (maybeContainer !== undefined) {
@@ -355,7 +368,8 @@ export class Loader extends EventEmitter implements IHostLoader {
                 await this.loadContainer(
                     docId,
                     request,
-                    resolvedAsFluid);
+                    resolvedAsFluid,
+                    pendingLocalState?.pendingRuntimeState);
         }
 
         if (container.deltaManager.lastSequenceNumber <= fromSequenceNumber) {
@@ -413,19 +427,18 @@ export class Loader extends EventEmitter implements IHostLoader {
         encodedDocId: string,
         request: IRequest,
         resolved: IFluidResolvedUrl,
+        pendingLocalState?: unknown,
     ): Promise<Container> {
-        const docId = decodeURI(encodedDocId);
         return Container.load(
             this,
             {
                 canReconnect: request.headers?.[LoaderHeader.reconnect],
                 clientDetailsOverride: request.headers?.[LoaderHeader.clientDetails],
-                containerUrl: request.url,
-                docId,
                 resolvedUrl: resolved,
                 version: request.headers?.[LoaderHeader.version],
-                pause: request.headers?.[LoaderHeader.pause],
+                loadMode: request.headers?.[LoaderHeader.loadMode],
             },
+            pendingLocalState,
         );
     }
 }

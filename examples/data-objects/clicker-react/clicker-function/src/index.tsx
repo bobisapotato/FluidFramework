@@ -1,11 +1,12 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
 import {
     DataObjectFactory,
 } from "@fluidframework/aqueduct";
+import { IEvent } from "@fluidframework/common-definitions";
 import {
     setSyncedObjectConfig,
     useSyncedObject,
@@ -72,10 +73,11 @@ export class ClickerFunction extends SyncedDataObject {
 }
 
 // ----- FACTORY SETUP -----
-export const ClickerFunctionInstantiationFactory = new DataObjectFactory(
-    "clicker-function",
-    ClickerFunction,
-    [],
-    {},
-);
+export const ClickerFunctionInstantiationFactory =
+    new DataObjectFactory<ClickerFunction, unknown, unknown, IEvent>(
+        "clicker-function",
+        ClickerFunction,
+        [],
+        {},
+    );
 export const fluidExport = ClickerFunctionInstantiationFactory;

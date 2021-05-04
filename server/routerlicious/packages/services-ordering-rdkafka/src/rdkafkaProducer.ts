@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -256,7 +256,7 @@ export class RdkafkaProducer extends RdkafkaBase implements IProducer {
 							this.handleError(err);
 						} else {
 							boxcar.deferred.resolve();
-							this.emit("produced", boxcarMessage, offset);
+							this.emit("produced", boxcarMessage, offset, message.length);
 						}
 					},
 				);
@@ -276,7 +276,7 @@ export class RdkafkaProducer extends RdkafkaBase implements IProducer {
 	private async handleError(error: any) {
 		await this.close(true);
 
-		this.emit("error", error);
+		this.error(error);
 
 		this.connect();
 	}

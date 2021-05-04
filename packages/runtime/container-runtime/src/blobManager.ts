@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -61,7 +61,7 @@ export class BlobManager {
     ) { }
 
     public async getBlob(blobId: string): Promise<IFluidHandle<ArrayBufferLike>> {
-        assert(this.blobIds.has(blobId) || this.pendingBlobIds.has(blobId), "requesting unknown blobs");
+        assert(this.blobIds.has(blobId) || this.pendingBlobIds.has(blobId), 0x11f /* "requesting unknown blobs" */);
         return new BlobHandle(
             `${BlobManager.basePath}/${blobId}`,
             this.routeContext,

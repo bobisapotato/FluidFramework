@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -68,8 +68,8 @@ export class WebWorkerLoader implements IHostLoader, IFluidRunnable, IFluidRoute
         return this.proxy.stop(reason);
     }
 
-    public async resolve(request: IRequest): Promise<IContainer> {
-        return this.proxy.resolve(request);
+    public async resolve(request: IRequest, pendingLocalState?: string): Promise<IContainer> {
+        return this.proxy.resolve(request, pendingLocalState);
     }
 
     public async createDetachedContainer(source: IFluidCodeDetails): Promise<IContainer> {

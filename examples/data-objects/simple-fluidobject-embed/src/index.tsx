@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -8,6 +8,7 @@ import {
     DataObject,
     DataObjectFactory,
 } from "@fluidframework/aqueduct";
+import { IEvent } from "@fluidframework/common-definitions";
 import { ClickerInstantiationFactory, Clicker } from "@fluid-example/clicker";
 import { IFluidHTMLView } from "@fluidframework/view-interfaces";
 
@@ -50,17 +51,21 @@ export class SimpleFluidObjectEmbed extends DataObject implements IFluidHTMLView
     }
 }
 
-export const SimpleFluidObjectEmbedInstantiationFactory = new DataObjectFactory(
-    simpleFluidObjectEmbedName,
-    SimpleFluidObjectEmbed,
-    [],
-    {},
-);
+export const SimpleFluidObjectEmbedInstantiationFactory =
+    // eslint-disable-next-line @typescript-eslint/ban-types
+    new DataObjectFactory<SimpleFluidObjectEmbed, undefined, undefined, IEvent>(
+        simpleFluidObjectEmbedName,
+        SimpleFluidObjectEmbed,
+        [],
+        {},
+        new Map([
+            ClickerInstantiationFactory.registryEntry,
+        ]),
+    );
 
 export const fluidExport = new ContainerRuntimeFactoryWithDefaultDataStore(
     SimpleFluidObjectEmbedInstantiationFactory,
     new Map([
         SimpleFluidObjectEmbedInstantiationFactory.registryEntry,
-        ClickerInstantiationFactory.registryEntry,
     ]),
 );

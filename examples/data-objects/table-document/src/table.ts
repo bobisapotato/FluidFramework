@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -12,6 +12,9 @@ import {
 
 export type TableDocumentItem = Jsonable<JsonablePrimitive | IFluidHandle>;
 
+/**
+ * @deprecated - ITable is an abandoned prototype.  Please use SharedMatrix with
+ *               the IMatrixProducer/Consumer interfaces instead. */
 export interface ITable {
     readonly numRows: number;
     readonly numCols: number;

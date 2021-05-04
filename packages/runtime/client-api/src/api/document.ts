@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -242,7 +242,7 @@ export async function load(
     urlResolver: IUrlResolver,
     options: ILoaderOptions = {},
     documentServiceFactory: IDocumentServiceFactory = defaultDocumentServiceFactory,
-    runtimeOptions: IContainerRuntimeOptions = { generateSummaries: false },
+    runtimeOptions: IContainerRuntimeOptions = { summaryOptions: { generateSummaries: false } },
 ): Promise<Document> {
     const codeLoader = new CodeLoader(runtimeOptions);
 

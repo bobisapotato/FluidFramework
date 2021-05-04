@@ -1,12 +1,16 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
 import { parse } from "url";
-import { fromUtf8ToBase64, Uint8ArrayToString } from "@fluidframework/common-utils";
-import { ISummaryTree, ISnapshotTree, SummaryType } from "@fluidframework/protocol-definitions";
 import { v4 as uuid } from "uuid";
+import { ITelemetryLogger } from "@fluidframework/common-definitions";
+import { fromUtf8ToBase64, bufferToString, performance } from "@fluidframework/common-utils";
+import { ISummaryTree, ISnapshotTree, SummaryType } from "@fluidframework/protocol-definitions";
+import { canRetryOnError, getRetryDelayFromError } from "@fluidframework/driver-utils";
+import { CreateContainerError } from "@fluidframework/container-utils";
+import { DeltaManager } from "./deltaManager";
 
 export interface IParsedUrl {
     id: string;
@@ -33,7 +37,17 @@ export function parseUrl(url: string): IParsedUrl | undefined {
         : undefined;
 }
 
-function convertProtocolAndAppSummaryToSnapshotTreeCore(
+/**
+ * Converts summary tree (for upload) to snapshot tree (for download).
+ * Summary tree blobs contain contents, but snapshot tree blobs normally
+ * contain IDs pointing to storage. This will create 2 blob entries in the
+ * snapshot tree for each blob in the summary tree. One will be the regular
+ * path pointing to a uniquely generated ID. Then there will be another
+ * entry with the path as that uniquely generated ID, and value as the
+ * blob contents as a base-64 string.
+ * @param summary - summary to convert
+ */
+function convertSummaryToSnapshotWithEmbeddedBlobContents(
     summary: ISummaryTree,
 ): ISnapshotTree {
     const treeNode = {
@@ -48,15 +62,15 @@ function convertProtocolAndAppSummaryToSnapshotTreeCore(
 
         switch (summaryObject.type) {
             case SummaryType.Tree: {
-                treeNode.trees[key] = convertProtocolAndAppSummaryToSnapshotTreeCore(summaryObject);
+                treeNode.trees[key] = convertSummaryToSnapshotWithEmbeddedBlobContents(summaryObject);
                 break;
             }
             case SummaryType.Blob: {
                 const blobId = uuid();
                 treeNode.blobs[key] = blobId;
-                const content = typeof summaryObject.content === "string" ?
-                    summaryObject.content : Uint8ArrayToString(summaryObject.content, "base64");
-                treeNode.blobs[blobId] = fromUtf8ToBase64(content);
+                treeNode.blobs[blobId] = typeof summaryObject.content === "string" ?
+                    fromUtf8ToBase64(summaryObject.content) :
+                    bufferToString(summaryObject.content, "base64");
                 break;
             }
             case SummaryType.Handle:
@@ -79,20 +93,81 @@ export function convertProtocolAndAppSummaryToSnapshotTree(
     protocolSummaryTree: ISummaryTree,
     appSummaryTree: ISummaryTree,
 ): ISnapshotTree {
-    const protocolSummaryTreeModified: ISummaryTree = {
+    // Shallow copy is fine, since we are doing a deep clone below.
+    const combinedSummary: ISummaryTree = {
         type: SummaryType.Tree,
-        tree: {
-            ".protocol": {
-                type: SummaryType.Tree,
-                tree: { ...protocolSummaryTree.tree },
-            },
-        },
-    };
-    const snapshotTree = convertProtocolAndAppSummaryToSnapshotTreeCore(protocolSummaryTreeModified);
-    snapshotTree.trees = {
-        ...snapshotTree.trees,
-        ...convertProtocolAndAppSummaryToSnapshotTreeCore(appSummaryTree).trees,
+        tree: { ...appSummaryTree.tree },
     };
 
+    combinedSummary.tree[".protocol"] = protocolSummaryTree;
+
+    const snapshotTree = convertSummaryToSnapshotWithEmbeddedBlobContents(combinedSummary);
     return snapshotTree;
+}
+
+const delay = async (timeMs: number): Promise<void> =>
+    new Promise((resolve) => setTimeout(() => resolve(), timeMs));
+
+export async function runWithRetry<T>(
+    api: () => Promise<T>,
+    fetchCallName: string,
+    deltaManager: Pick<DeltaManager, "emitDelayInfo" | "refreshDelayInfo">,
+    logger: ITelemetryLogger,
+    shouldRetry?: () => { retry: boolean, error: any | undefined},
+): Promise<T> {
+    let result: T | undefined;
+    let success = false;
+    let retryAfterSeconds = 1; // has to be positive!
+    let numRetries = 0;
+    const startTime = performance.now();
+    let lastError: any;
+    let id: string | undefined;
+    do {
+        try {
+            result = await api();
+            if (id !== undefined) {
+                deltaManager.refreshDelayInfo(id);
+            }
+            success = true;
+        } catch (err) {
+            if (shouldRetry !== undefined) {
+                const res = shouldRetry();
+                if (res.retry === false) {
+                    if (res.error !== undefined) {
+                        throw res.error;
+                    }
+                    throw err;
+                }
+            }
+            // If it is not retriable, then just throw the error.
+            if (!canRetryOnError(err)) {
+                logger.sendErrorEvent({
+                    eventName: fetchCallName,
+                    retry: numRetries,
+                    duration: performance.now() - startTime,
+                }, err);
+                throw err;
+            }
+            numRetries++;
+            lastError = err;
+            // If the error is throttling error, then wait for the specified time before retrying.
+            // If the waitTime is not specified, then we start with retrying immediately to max of 8s.
+            retryAfterSeconds = getRetryDelayFromError(err) ?? Math.min(retryAfterSeconds * 2, 8);
+            if (id === undefined) {
+                id = uuid();
+            }
+            deltaManager.emitDelayInfo(id, retryAfterSeconds, CreateContainerError(err));
+            await delay(retryAfterSeconds * 1000);
+        }
+    } while (!success);
+    if (numRetries > 0) {
+        logger.sendTelemetryEvent({
+            eventName: fetchCallName,
+            retry: numRetries,
+            duration: performance.now() - startTime,
+        },
+        lastError);
+    }
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    return result!;
 }

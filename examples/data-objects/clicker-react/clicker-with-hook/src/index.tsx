@@ -1,11 +1,12 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
 import {
     DataObjectFactory,
 } from "@fluidframework/aqueduct";
+import { IEvent } from "@fluidframework/common-definitions";
 import {
     SyncedDataObject,
     setSyncedCounterConfig,
@@ -66,10 +67,11 @@ export class ClickerWithHook extends SyncedDataObject {
 }
 
 // ----- FACTORY SETUP -----
-export const ClickerWithHookInstantiationFactory = new DataObjectFactory(
-    "clicker-with-hook",
-    ClickerWithHook,
-    [SharedCounter.getFactory()],
-    {},
-);
+export const ClickerWithHookInstantiationFactory =
+    new DataObjectFactory<ClickerWithHook, unknown, unknown, IEvent>(
+        "clicker-with-hook",
+        ClickerWithHook,
+        [SharedCounter.getFactory()],
+        {},
+    );
 export const fluidExport = ClickerWithHookInstantiationFactory;

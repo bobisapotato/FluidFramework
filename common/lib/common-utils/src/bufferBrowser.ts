@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -32,6 +32,7 @@ export function Uint8ArrayToString(arr: Uint8Array, encoding?: string): string {
 
 /**
  * Convert base64 or utf8 string to array buffer
+ * @param encoding - input string's encoding
  */
 export const stringToBuffer = (input: string, encoding: string): ArrayBufferLike =>
     IsoBuffer.from(input, encoding).buffer;
@@ -40,6 +41,7 @@ export const stringToBuffer = (input: string, encoding: string): ArrayBufferLike
  * Convert binary blob to string format
  *
  * @param blob - the binary blob
+ * @param encoding - output string's encoding
  * @returns the blob in string format
  */
 export const bufferToString = (blob: ArrayBufferLike, encoding: string): string =>
@@ -91,8 +93,8 @@ export class IsoBuffer extends Uint8Array {
         // Capture any typed arrays, including Uint8Array (and thus - IsoBuffer!)
         } else if (value !== null && typeof value === "object" && isArrayBuffer(value.buffer)) {
             // Support currently for full array, no view ports! (though it can be added in future)
-            assert(value.byteOffset === 0);
-            assert(value.byteLength === value.buffer.byteLength);
+            assert(value.byteOffset === 0, 0x000 /* "nonzero isobuffer byte offset" */);
+            assert(value.byteLength === value.buffer.byteLength, 0x001 /* "unexpected isobuffer byte length" */);
             return IsoBuffer.fromArrayBuffer(value.buffer, encodingOrOffset as number | undefined, length);
         } else if (isArrayBuffer(value)) {
             return IsoBuffer.fromArrayBuffer(value, encodingOrOffset as number | undefined, length);

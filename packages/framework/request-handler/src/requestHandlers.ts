@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -50,7 +50,7 @@ class LegacyUriHandle<T = IFluidObject & IFluidLoadable> implements IFluidHandle
     }
 
     public attachGraph() {
-        assert(false);
+        assert(false, 0x0ca /* "Trying to use legacy graph attach!" */);
     }
 
     public async get(): Promise<any> {

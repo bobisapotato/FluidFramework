@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -82,6 +82,7 @@ export class CheckpointContext {
                 sequenceNumber: checkpoint.sequenceNumber,
                 epoch: checkpoint.epoch,
                 term: checkpoint.term,
+                lastSentMSN: checkpoint.lastSentMSN,
             };
 
             updateP = this.checkpointManager.writeCheckpoint(deliCheckpoint);
