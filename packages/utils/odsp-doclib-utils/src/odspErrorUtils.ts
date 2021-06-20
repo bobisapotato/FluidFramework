@@ -63,23 +63,47 @@ export function getSPOAndGraphRequestIdsFromResponse(headers: { get: (id: string
     return additionalProps;
 }
 
+export interface IFacetCodes {
+    facetCodes?: string[];
+ }
+
+export function parseFacetCodes(response: string): string[] {
+    const stack: string[] = [];
+    let error;
+    try {
+        error = JSON.parse(response).error;
+    }
+    catch(e) {
+        return stack;
+    }
+
+    // eslint-disable-next-line no-null/no-null
+    while (typeof error === "object" && error !== null) {
+        if (error.code !== undefined) {
+            stack.unshift(error.code);
+        }
+        error = error.innerError;
+    }
+    return stack;
+}
+
 export function createOdspNetworkError(
     errorMessage: string,
     statusCode: number,
     retryAfterSeconds?: number,
     response?: Response,
     responseText?: string,
-): OdspError {
-    let error: OdspError & LoggingError;
+): OdspError & LoggingError & IFacetCodes {
+    let error: OdspError & LoggingError & IFacetCodes;
     switch (statusCode) {
         case 400:
-            error = new GenericNetworkError(errorMessage, false, statusCode);
+            error = new GenericNetworkError(errorMessage, false, { statusCode });
             break;
         case 401:
         case 403:
             const claims = response?.headers ? parseAuthErrorClaims(response.headers) : undefined;
             const tenantId = response?.headers ? parseAuthErrorTenant(response.headers) : undefined;
-            error = new AuthorizationError(errorMessage, claims, tenantId, statusCode);
+            error = new AuthorizationError(errorMessage, claims, tenantId, { statusCode });
             break;
         case 404:
             error = new NonRetryableError(
@@ -103,7 +127,7 @@ export function createOdspNetworkError(
             error = new NonRetryableError(errorMessage, OdspErrorType.invalidFileNameError, { statusCode });
             break;
         case 500:
-            error = new GenericNetworkError(errorMessage, true, statusCode);
+            error = new GenericNetworkError(errorMessage, true, { statusCode });
             break;
         case 501:
             error = new NonRetryableError(errorMessage, OdspErrorType.fluidNotEnabled, { statusCode });
@@ -128,12 +152,17 @@ export function createOdspNetworkError(
             error = new NonRetryableError(errorMessage, OdspErrorType.fetchTokenError, { statusCode });
             break;
         default:
-            error = createGenericNetworkError(errorMessage, true, retryAfterSeconds, statusCode);
+            const retryAfterMs = retryAfterSeconds !== undefined ? retryAfterSeconds * 1000 : undefined;
+            error = createGenericNetworkError(errorMessage, true, retryAfterMs, { statusCode });
     }
 
     error.online = OnlineStatus[isOnline()];
 
-    const props: ITelemetryProperties = { response: responseText };
+    const facetCodes = responseText !== undefined ? parseFacetCodes(responseText) : undefined;
+    error.facetCodes = facetCodes;
+
+    const props: ITelemetryProperties = { response: responseText,
+        innerMostErrorCode: facetCodes !== undefined ? facetCodes[0] : undefined};
     if (response) {
         props.responseType = response.type;
         if (response.headers) {

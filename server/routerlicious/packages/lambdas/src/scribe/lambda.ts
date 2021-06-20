@@ -17,6 +17,7 @@ import {
     MessageType,
     ISequencedDocumentAugmentedMessage,
     IProtocolState,
+    ScopeType,
 } from "@fluidframework/protocol-definitions";
 import {
     ControlMessageType,
@@ -32,6 +33,7 @@ import {
     SequencedOperationType,
     IQueuedMessage,
     IPartitionLambda,
+    INackMessagesControlMessageContents,
 } from "@fluidframework/server-services-core";
 import Deque from "double-ended-queue";
 import * as _ from "lodash";
@@ -110,7 +112,7 @@ export class ScribeLambda implements IPartitionLambda {
                         }
                         this.term = lastSummary.term;
                         const lastScribe = JSON.parse(lastSummary.scribe) as IScribe;
-                        this.protocolHead = lastSummary.protocolHead;
+                        await this.updateProtocolHead(lastSummary.protocolHead);
                         this.protocolHandler = initializeProtocol(lastScribe.protocolState, this.term);
                         this.setStateFromCheckpoint(lastScribe);
                         this.pendingMessages = new Deque<ISequencedDocumentMessage>(
@@ -192,9 +194,6 @@ export class ScribeLambda implements IPartitionLambda {
                             const summaryResponse = await this.summaryWriter.writeClientSummary(
                                 operation,
                                 this.lastClientSummaryHead,
-                                this.protocolHandler.minimumSequenceNumber,
-                                this.protocolHandler.sequenceNumber,
-                                this.protocolHandler.quorum.snapshot(),
                                 scribeCheckpoint,
                                 this.pendingCheckpointMessages.toArray(),
                             );
@@ -208,7 +207,7 @@ export class ScribeLambda implements IPartitionLambda {
                                 if (summaryResponse.status) {
                                     await this.sendSummaryAck(summaryResponse.message as ISummaryAck);
                                     await this.sendSummaryConfirmationMessage(operation.sequenceNumber, false);
-                                    this.protocolHead = this.protocolHandler.sequenceNumber;
+                                    await this.updateProtocolHead(this.protocolHandler.sequenceNumber);
                                     this.context.log?.info(
                                         `Client summary success @${value.operation.sequenceNumber}`,
                                         {
@@ -312,8 +311,20 @@ export class ScribeLambda implements IPartitionLambda {
                     // An external summary writer can only update the protocolHead when the ack is sequenced
                     // back to the stream.
                     if (this.summaryWriter.isExternal) {
-                        this.protocolHead = content.summaryProposal.summarySequenceNumber;
+                        await this.updateProtocolHead(content.summaryProposal.summarySequenceNumber);
                     }
+                }
+
+                // check to see if this exact sequence number causes us to hit the max ops since last summary nack limit
+                if (this.serviceConfiguration.scribe.nackMessages.enable &&
+                    this.serviceConfiguration.scribe.nackMessages.maxOps === this.sequenceNumber - this.protocolHead) {
+                    // this op brings us over the limit
+                    // tell deli to start nacking non-system ops and ops that are submitted by non-summarizers
+                    await this.sendNackMessage({
+                        content: this.serviceConfiguration.scribe.nackMessages.nackContent,
+                        allowSystemMessages: true,
+                        allowedScopes: [ScopeType.SummaryWrite],
+                    });
                 }
             }
         }
@@ -352,8 +363,10 @@ export class ScribeLambda implements IPartitionLambda {
             } catch (error) {
                 this.context.log?.error(`Protocol error ${error}`,
                     {
-                        documentId: this.documentId,
-                        tenantId: this.tenantId,
+                        messageMetaData: {
+                            documentId: this.documentId,
+                            tenantId: this.tenantId,
+                        },
                     });
             }
         }
@@ -427,6 +440,29 @@ export class ScribeLambda implements IPartitionLambda {
         }
     }
 
+    /**
+     * Protocol head is the sequence number of the last summary
+     * This method updates the protocol head to the new summary sequence number
+     * @param protocolHead The sequence number of the new summary
+     */
+    private async updateProtocolHead(protocolHead: number) {
+        if (this.serviceConfiguration.scribe.nackMessages.enable) {
+            const opsSincePreviousSummary = this.sequenceNumber - this.protocolHead;
+            if (opsSincePreviousSummary >= this.serviceConfiguration.scribe.nackMessages.maxOps) {
+                // we were over the limit, so we must have been nacking messages
+
+                // verify this new summary will get out us of this state
+                const opsSinceNewSummary = this.sequenceNumber - protocolHead;
+                if (opsSinceNewSummary < this.serviceConfiguration.scribe.nackMessages.maxOps) {
+                    // tell deli to stop nacking future messages
+                    await this.sendNackMessage(undefined);
+                }
+            }
+        }
+
+        this.protocolHead = protocolHead;
+    }
+
     private async sendSummaryAck(contents: ISummaryAck) {
         const operation: IDocumentMessage = {
             clientSequenceNumber: -1,
@@ -462,6 +498,24 @@ export class ScribeLambda implements IPartitionLambda {
                 durableSequenceNumber,
                 clearCache,
             },
+        };
+
+        const operation: IDocumentSystemMessage = {
+            clientSequenceNumber: -1,
+            contents: null,
+            data: JSON.stringify(controlMessage),
+            referenceSequenceNumber: -1,
+            traces: this.serviceConfiguration.enableTraces ? [] : undefined,
+            type: MessageType.Control,
+        };
+
+        return this.sendToDeli(operation);
+    }
+
+    private async sendNackMessage(contents: INackMessagesControlMessageContents | undefined) {
+        const controlMessage: IControlMessage = {
+            type: ControlMessageType.NackMessages,
+            contents,
         };
 
         const operation: IDocumentSystemMessage = {

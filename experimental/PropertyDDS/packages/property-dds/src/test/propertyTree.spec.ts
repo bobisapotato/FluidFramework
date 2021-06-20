@@ -3,6 +3,8 @@
  * Licensed under the MIT License.
  */
 
+import _ from "lodash";
+
 import { expect } from "chai";
 import { IContainer, ILoader, IHostLoader, ILoaderOptions } from "@fluidframework/container-definitions";
 import { IFluidCodeDetails, IFluidSerializer } from "@fluidframework/core-interfaces";
@@ -108,6 +110,70 @@ describe("PropertyTree", () => {
 
 				expect((sharedPropertyTree2.root.get("test") as StringProperty).getValue()).to.equal("Magic");
 			});
+
+            it("Can commit with metadata", async () => {
+				await opProcessingController.pauseProcessing();
+
+				sharedPropertyTree1.root.insert("test", PropertyFactory.create("String", undefined, "Magic"));
+
+				expect((sharedPropertyTree1.root.get("test") as StringProperty).getValue()).to.equal("Magic");
+				expect(sharedPropertyTree2.root.get("test")).to.equal(undefined);
+
+				sharedPropertyTree1.commit({someKey: "some data"});
+                expect(sharedPropertyTree1.activeCommit.metadata).to.deep.equal({someKey: "some data"});
+
+				await opProcessingController.process(container1.deltaManager, container2.deltaManager);
+
+				expect((sharedPropertyTree2.root.get("test") as StringProperty).getValue()).to.equal("Magic");
+                expect(sharedPropertyTree2.activeCommit.metadata).to.deep.equal({someKey: "some data"});
+			});
+
+            it("Can commit with metadata, with empty changeset, when commit behaviour is unspecified", async () => {
+				await opProcessingController.pauseProcessing();
+				sharedPropertyTree1.commit({someKey: "some data"});
+                expect(sharedPropertyTree1.activeCommit.metadata).to.deep.equal({someKey: "some data"});
+
+				await opProcessingController.process(container1.deltaManager, container2.deltaManager);
+                expect(sharedPropertyTree2.activeCommit.metadata).to.deep.equal({someKey: "some data"});
+			});
+
+            it("Cannot commit with metadata, with empty changeset, behaviour is specified to false", async () => {
+				await opProcessingController.pauseProcessing();
+				sharedPropertyTree1.commit({someKey: "some data"}, false);
+                expect(sharedPropertyTree1.activeCommit).to.equal(undefined);
+
+				await opProcessingController.process(container1.deltaManager, container2.deltaManager);
+                expect(sharedPropertyTree2.activeCommit).to.equal(undefined);
+			});
+
+            it("Can commit with metadata, with empty changeset, behaviour is specified to true", async () => {
+				await opProcessingController.pauseProcessing();
+				sharedPropertyTree1.commit({someKey: "some data"}, true);
+                expect(sharedPropertyTree1.activeCommit.metadata).to.deep.equal({someKey: "some data"});
+
+				await opProcessingController.process(container1.deltaManager, container2.deltaManager);
+                expect(sharedPropertyTree2.activeCommit.metadata).to.deep.equal({someKey: "some data"});
+			});
+
+            it("Should not commit empty change by default", async () => {
+				await opProcessingController.pauseProcessing();
+
+				sharedPropertyTree1.commit();
+
+				await opProcessingController.process(container1.deltaManager, container2.deltaManager);
+				expect(sharedPropertyTree2.remoteChanges.length).to.equal(0);
+			});
+
+            it("Should commit empty change", async () => {
+				await opProcessingController.pauseProcessing();
+
+				sharedPropertyTree1.commit(true);
+
+				await opProcessingController.process(container1.deltaManager, container2.deltaManager);
+				expect(sharedPropertyTree2.remoteChanges.length).to.equal(1);
+				expect(_.isEmpty(_.last(sharedPropertyTree2.remoteChanges)?.changeSet)).to.equal(true);
+			});
+
 			it("Can start/stopTransmission", async () => {
 				sharedPropertyTree1.stopTransmission(true);
 				sharedPropertyTree1.root.insert("test", PropertyFactory.create("String", undefined, "Magic"));
